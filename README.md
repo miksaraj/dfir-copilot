@@ -8,7 +8,7 @@ A locally-run, evidence-led DFIR analysis orchestrator written in PHP 8.3+. The 
 
 ```
 ┌──────────────────────────────────────────────────────────────┐
-│  HOST (Linux)                                             │
+│  HOST (Linux)                                                │
 │                                                              │
 │  ┌─────────┐   ┌──────────────┐   ┌───────────────────────┐ │
 │  │  Ollama  │   │ dfirbus.php  │   │  Case Workspace       │ │
@@ -17,7 +17,15 @@ A locally-run, evidence-led DFIR analysis orchestrator written in PHP 8.3+. The 
 │  │ judge    │   └──────┬───────┘   └───────────────────────┘ │
 │  └─────────┘           │                                     │
 │                        │                                     │
-│            ┌───────────┼───────────┐                         │
+│  ┌──────────┐          │                                     │
+│  │ nomic-   │          │                                     │
+│  │ embed-   │◄─────────┤                                     │
+│  │ text     │          │                                     │
+│  │ (CPU)    │   ┌──────┴──────┐                              │
+│  └──────────┘   │  RAG Index  │                              │
+│                 │ knowledge/  │                               │
+│            ┌────┤ index.json  ├────┐                         │
+│            │    └─────────────┘    │                         │
 │            ▼           ▼           ▼                         │
 │     LocalExecutor  SSHExecutor  WinRMExecutor                │
 │     (host tools)   (php-ssh2)  (curl + SOAP)                │
@@ -71,6 +79,9 @@ curl -fsSL https://ollama.com/install.sh | sh
 # Pull the default model (single model serves both worker + judge)
 ollama pull qwen3:8b
 
+# Pull the embedding model for the knowledge base (runs on CPU, no VRAM needed)
+ollama pull nomic-embed-text
+
 # Optional: heavy model for complex reasoning (CPU/GPU split, slower)
 # ollama pull qwen3:14b
 
@@ -90,30 +101,34 @@ export OLLAMA_MAX_LOADED_MODELS=1        # Keep only one model loaded at a time
 php dfirbus.php init-config
 # Edit config.json — set VM IPs, SSH key paths, model names
 
-# 2. Test connectivity
+# 2. Test connectivity (Ollama, embedding model, SSH, WinRM)
 php dfirbus.php test-connections
 
-# 3. Create a case and ingest evidence
+# 3. Index scenario CTI into the knowledge base
+#    (Place .md/.txt files in knowledge/actors/, knowledge/scenario/, knowledge/notes/)
+php dfirbus.php kb-index
+
+# 4. Create a case and ingest evidence
 php dfirbus.php new-case challenge-01
 php dfirbus.php ingest challenge-01 /path/to/challenge/bundle/
 
-# 4. Run local triage (file IDs, entropy — no VMs needed)
+# 5. Run local triage (file IDs, entropy — no VMs needed)
 php dfirbus.php triage challenge-01
 
-# 5. Run specific adapters
+# 6. Run specific adapters
 php dfirbus.php run challenge-01 file_id file_path=raw/suspicious.exe
 php dfirbus.php run challenge-01 strings_and_iocs file_path=raw/suspicious.exe
 php dfirbus.php run challenge-01 yara_scan file_path=raw/suspicious.exe
 php dfirbus.php run challenge-01 extract_iocs input_file=derived/suspicious_strings.txt
 php dfirbus.php run challenge-01 attack_map 'observations=["powershell execution","scheduled task persistence","dns tunneling"]'
 
-# 6. Run the agent (single worker + judge cycle)
+# 7. Run the agent (single worker + judge cycle)
 php dfirbus.php agent challenge-01 "Triage the malware sample and identify C2 infrastructure"
 
-# 7. Auto-pilot mode (repeats until judge approves)
+# 8. Auto-pilot mode (repeats until judge approves)
 php dfirbus.php agent-auto challenge-01 "Full analysis and attribution" --max-cycles=10
 
-# 8. Generate blue-team report
+# 9. Generate blue-team report
 php dfirbus.php report challenge-01
 ```
 
@@ -126,6 +141,7 @@ php dfirbus.php report challenge-01
 | `extract_iocs` | local | Parse IOCs from text files |
 | `attack_map` | local | Map observations → ATT&CK |
 | `actor_rank` | local | Rank actors from scenario CTI |
+| `knowledge_search` | local | Search scenario CTI knowledge base (RAG) |
 | `strings_and_iocs` | remnux | Extract strings via SSH (php-ssh2) |
 | `yara_scan` | remnux | YARA rule scanning |
 | `capa_scan` | remnux | Binary capability analysis |
@@ -134,6 +150,91 @@ php dfirbus.php report challenge-01
 | `pcap_summary` | remnux | PCAP network extraction (tshark) |
 | `pe_quicklook` | flare | PE metadata via WinRM |
 
+## Knowledge Base (RAG)
+
+The knowledge base lets the agent search scenario CTI, threat actor profiles, and your team's notes during analysis and attribution. It uses local embeddings — no internet required during the exercise.
+
+### How it works
+
+1. You place `.md` or `.txt` files in `knowledge/`
+2. `php dfirbus.php kb-index` chunks them (~512 chars, sentence-aware), embeds via `nomic-embed-text` (runs on CPU, doesn't touch VRAM), and writes a flat-file vector index
+3. The agent has a `knowledge_search` tool that queries this index via cosine similarity
+4. Results come back with **stable chunk IDs** like `TA-03:chunk_002` that the model must cite in its analysis
+
+This is what makes attribution fast and consistent — the model cites "TA-03:chunk_002: Known to use schtasks for persistence" instead of paraphrasing from memory.
+
+### Knowledge directory structure
+
+```
+knowledge/
+├── actors/             ← One file per threat actor
+│   ├── TA-01.md
+│   ├── TA-02.md
+│   └── TA-03.md
+├── scenario/           ← Scenario briefs and CTI reports
+│   ├── scenario_brief.md
+│   └── threat_landscape.md
+├── notes/              ← Your team's cheat sheets and prior-year notes
+│   ├── common_ttps.md
+│   └── last_year_lessons.md
+├── README.md           ← Structure guide (not indexed)
+└── index.json          ← Auto-generated vector index (gitignored)
+```
+
+Keep files focused — one actor per file, one topic per file. The chunker works best with coherent, single-topic documents.
+
+### CLI commands
+
+```bash
+# Index everything in knowledge/ (re-indexes changed files)
+php dfirbus.php kb-index
+
+# Index a single file with a specific document ID
+php dfirbus.php kb-ingest knowledge/actors/TA-03.md TA-03
+
+# Search the knowledge base
+php dfirbus.php kb-search "PowerShell persistence scheduled tasks"
+
+# List indexed documents and chunk counts
+php dfirbus.php kb-list
+
+# Clear the entire index (files in knowledge/ are kept)
+php dfirbus.php kb-clear
+```
+
+### How the agent uses it
+
+The agent has access to `knowledge_search` as a tool, exactly like `yara_scan` or `file_id`. During the attribution phase, a typical flow looks like:
+
+1. Agent observes TTPs from tool outputs (e.g., schtasks persistence, DNS tunneling)
+2. Agent calls `knowledge_search(query="scheduled task persistence DNS tunneling")`
+3. RAG returns ranked excerpts with chunk IDs and similarity scores
+4. Agent cites specific chunks in its attribution: "Based on [TA-03:chunk_002], the use of schtasks with `/tn` names containing 'Update' matches TA-03's known TTPs"
+5. Judge verifies that every attribution claim has a knowledge base citation
+
+### Exercise day workflow
+
+1. Receive scenario brief → save as `knowledge/scenario/scenario_brief.md`
+2. Receive actor profiles → save each as `knowledge/actors/TA-XX.md`
+3. Run `php dfirbus.php kb-index`
+4. Verify: `php dfirbus.php kb-list` should show all documents
+5. The agent can now search CTI during analysis and attribution
+
+### Embedding model
+
+The default embedding model is `nomic-embed-text` (137M params, 768 dimensions). It runs entirely on CPU via Ollama, so it doesn't compete with qwen3:8b for GPU VRAM. Embedding the entire knowledge base (~50–200 chunks) takes under 30 seconds.
+
+### Technical details
+
+The RAG implementation has no external dependencies — it's four PHP classes:
+
+- **Chunker** — splits on sentence boundaries with configurable overlap (default: 512 chars, 64 overlap)
+- **Embedder** — calls Ollama's `/api/embed` endpoint, supports batched embedding
+- **VectorStore** — flat-file JSON index, brute-force cosine similarity search (adequate for <1000 chunks)
+- **KnowledgeBase** — orchestrates ingest and search, strips markdown formatting before embedding
+
+The vector index lives at `knowledge/index.json` and is gitignored — it's regenerated from source documents on each `kb-index` run.
+
 ## Project Structure
 
 ```
@@ -141,6 +242,7 @@ dfir-copilot/
 ├── dfirbus.php              ← Single CLI entry point
 ├── autoload.php             ← PSR-4 autoloader (no Composer)
 ├── config.json              ← Your config (generated by init-config)
+├── .gitignore               ← Ignores cases/, keys/, config.json, index.json
 ├── src/
 │   ├── Config.php           ← Configuration loader
 │   ├── Case/
@@ -154,12 +256,23 @@ dfir-copilot/
 │   │   ├── BaseAdapter.php  ← Base class + registry
 │   │   ├── HostAdapters.php ← intake, file_id, iocs, attack_map, actor_rank
 │   │   ├── REMnuxAdapters.php ← strings, yara, capa, vol3, plaso, pcap
-│   │   └── FLAREAdapters.php  ← pe_quicklook
+│   │   ├── FLAREAdapters.php  ← pe_quicklook
+│   │   └── RagAdapter.php  ← knowledge_search (queries the RAG index)
+│   ├── Rag/
+│   │   ├── Chunker.php     ← Sentence-aware text chunker
+│   │   ├── Embedder.php    ← Ollama embedding API client
+│   │   ├── VectorStore.php ← Flat-file vector index + cosine similarity
+│   │   └── KnowledgeBase.php ← Ingest + search orchestrator
 │   └── Agent/
 │       ├── OllamaClient.php ← Ollama API via native curl
 │       └── AgentLoop.php    ← Single-model dual-prompt worker + judge
-├── cases/                   ← Case workspaces (created at runtime)
-├── knowledge/               ← Scenario CTI for RAG (Phase 3)
+├── knowledge/               ← Scenario CTI for RAG
+│   ├── actors/              ← Threat actor profiles (one per file)
+│   ├── scenario/            ← Scenario briefs
+│   ├── notes/               ← Team notes and cheat sheets
+│   └── index.json           ← Auto-generated vector index (gitignored)
+├── cases/                   ← Case workspaces (gitignored)
+├── keys/                    ← SSH keys (gitignored)
 └── yara-rules/              ← Your curated YARA rulesets
 ```
 
@@ -244,6 +357,13 @@ Generated by `php dfirbus.php init-config`. Key settings:
     "judge_thinking": false,
     "heavy_model": "",
     "specialist_model": ""
+  },
+  "rag": {
+    "knowledge_dir": "knowledge",
+    "embedding_model": "nomic-embed-text",
+    "chunk_size": 512,
+    "chunk_overlap": 64,
+    "top_k": 5
   }
 }
 ```
@@ -256,14 +376,17 @@ Generated by `php dfirbus.php init-config`. Key settings:
 | `qwen3:8b` + 16K ctx + q8_0 KV | ~7.5 GB | 35–45 tok/s | Large artifacts (disk image strings) |
 | `qwen3:14b` (CPU/GPU split) | ~10.7 GB total | 8–12 tok/s | Complex multi-step reasoning |
 
+Note: `nomic-embed-text` runs on CPU and does not consume VRAM. It adds no overhead to the LLM inference budget.
+
 ## How the Agent Works
 
 1. **Worker** (qwen3:8b, thinking mode) gets the current case state — files, IOCs, tools already run, hypotheses
 2. Worker decides which adapter to call next via Ollama native tool calling
 3. Adapter executes on the correct target (local/REMnux/FLARE) — the model never runs arbitrary commands
-4. Results go back to the worker, who extracts findings and calls more tools or proposes conclusions
-5. **Judge** (same model, non-thinking mode, different system prompt) reviews: rejects claims without evidence pointers, demands alternative hypotheses, flags missing triage steps
-6. If rejected → required actions feed back to the worker → loop continues
+4. For attribution, the worker calls `knowledge_search` to retrieve scenario CTI excerpts with citable chunk IDs
+5. Results go back to the worker, who extracts findings and calls more tools or proposes conclusions
+6. **Judge** (same model, non-thinking mode, different system prompt) reviews: rejects claims without evidence pointers, demands alternative hypotheses, flags missing triage steps
+7. If rejected → required actions feed back to the worker → loop continues
 
 Since both roles share a model, there is **zero model-swap overhead** between cycles.
 

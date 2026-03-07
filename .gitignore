@@ -1,0 +1,30 @@
+# ── Case data (contains evidence — never commit) ─────────────
+cases/
+
+# ── Knowledge base index (regenerated from source docs) ──────
+knowledge/index.json
+
+# ── Knowledge base files ───────────────────────────────────
+knowledge/actors/
+knowledge/scenario/
+knowledge/notes/
+
+# ── SSH keys ──────────────────────────────────────────────────
+keys/
+
+# ── Runtime config (contains passwords, IPs) ─────────────────
+config.json
+
+# ── OS / editor junk ─────────────────────────────────────────
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+.idea/
+.vscode/
+*.iml
+
+# ── PHP ──────────────────────────────────────────────────────
+vendor/
+composer.lock

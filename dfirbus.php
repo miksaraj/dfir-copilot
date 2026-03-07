@@ -11,9 +11,11 @@ use DFIRCopilot\Adapters\AdapterRegistry;
 use DFIRCopilot\Adapters\{IntakeBundle, FileID, ExtractIOCs, ATTACKMap, ActorRank};
 use DFIRCopilot\Adapters\{StringsAndIOCs, YARAScan, CapaScan, Vol3Triage, TimelineBuild, PCAPSummary};
 use DFIRCopilot\Adapters\PEQuicklook;
+use DFIRCopilot\Adapters\KnowledgeSearch;
 use DFIRCopilot\Agent\{OllamaClient, AgentLoop};
 use DFIRCopilot\Executors\SSHExecutor;
 use DFIRCopilot\Executors\WinRMExecutor;
+use DFIRCopilot\Rag\KnowledgeBase;
 
 // ── Adapter registration ─────────────────────────────────────────
 
@@ -31,6 +33,7 @@ function registerAllAdapters(): void
 	AdapterRegistry::register(new TimelineBuild());
 	AdapterRegistry::register(new PCAPSummary());
 	AdapterRegistry::register(new PEQuicklook());
+	AdapterRegistry::register(new KnowledgeSearch());
 }
 
 // ── CLI helpers ──────────────────────────────────────────────────
@@ -40,7 +43,6 @@ function err(string $msg): void { fwrite(STDERR, $msg . "\n"); }
 
 function getConfigPath(array $argv): string
 {
-	// Check for --config=path or --config path
 	for ($i = 0; $i < count($argv); $i++) {
 		if (str_starts_with($argv[$i], '--config=')) {
 			return substr($argv[$i], 9);
@@ -68,11 +70,18 @@ Commands:
   list-files <case_id>              List raw files in a case
   status <case_id>                  Show case state
   ledger <case_id>                  Show provenance ledger
-  test-connections                  Test VM and Ollama connectivity
+  test-connections                  Test VM, Ollama, and RAG connectivity
   triage <case_id>                  Run local triage on all files
   agent <case_id> [instruction]     Run one worker+judge cycle
   agent-auto <case_id> [instruction] [--max-cycles=N]  Auto-pilot
   report <case_id>                  Generate blue-team report
+
+Knowledge base:
+  kb-index                          Index all files in knowledge/
+  kb-ingest <file> <doc_id>         Index a single file with a given ID
+  kb-search <query>                 Search the knowledge base
+  kb-list                           List indexed documents
+  kb-clear                          Clear the knowledge base index
 
 Global options:
   --config=<path>                   Config file (default: config.json)
@@ -91,9 +100,10 @@ function cmdInitConfig(): void
 	out("Default model: qwen3:8b (single model for both worker + judge)");
 	out("Pull it:  ollama pull qwen3:8b");
 	out("");
-	out("Optional models:");
-	out("  Heavy reasoning:  ollama pull qwen3:14b       (set ollama.heavy_model)");
-	out("  Cyber specialist: import Foundation-Sec-8B     (set ollama.specialist_model)");
+	out("RAG knowledge base:");
+	out("  Pull embedding model:  ollama pull nomic-embed-text");
+	out("  Place scenario CTI in: knowledge/");
+	out("  Index:                 php dfirbus.php kb-index");
 	out("");
 	out("Recommended Ollama env vars for 8 GB VRAM:");
 	out("  export OLLAMA_KV_CACHE_TYPE=q8_0");
@@ -142,12 +152,10 @@ function cmdRun(Config $cfg, string $caseId, string $adapterName, array $rawArgs
 		exit(1);
 	}
 
-	// Parse key=value args
 	$params = [];
 	foreach ($rawArgs as $arg) {
 		if (str_contains($arg, '=')) {
 			[$k, $v] = explode('=', $arg, 2);
-			// Try JSON decode for arrays/objects
 			$decoded = json_decode($v, true);
 			$params[$k] = $decoded !== null ? $decoded : $v;
 		}
@@ -226,35 +234,24 @@ function cmdTestConnections(Config $cfg): void
 		out("✓ Ollama: connected");
 		out("  Models: " . implode(', ', array_slice($status['models'], 0, 10)));
 
-		// Check worker model
 		$workerOk = in_array($cfg->ollamaWorkerModel, $status['models'], true)
 			|| count(array_filter($status['models'], fn($m) => str_contains($m, $cfg->ollamaWorkerModel))) > 0;
 		out("  Worker ({$cfg->ollamaWorkerModel}): " . ($workerOk ? '✓' : '✗ NOT FOUND — run: ollama pull ' . $cfg->ollamaWorkerModel));
 
-		// Check judge model (may be same as worker in single-model mode)
 		if ($cfg->isSingleModelMode()) {
 			out("  Judge: same model (single-model dual-prompt mode) ✓");
 		} else {
 			$judgeOk = in_array($cfg->ollamaJudgeModel, $status['models'], true)
 				|| count(array_filter($status['models'], fn($m) => str_contains($m, $cfg->ollamaJudgeModel))) > 0;
-			out("  Judge ({$cfg->ollamaJudgeModel}): " . ($judgeOk ? '✓' : '✗ NOT FOUND — run: ollama pull ' . $cfg->ollamaJudgeModel));
+			out("  Judge ({$cfg->ollamaJudgeModel}): " . ($judgeOk ? '✓' : '✗ NOT FOUND'));
 		}
 
-		// Check optional heavy model
 		if ($cfg->hasHeavyModel()) {
 			$heavyOk = in_array($cfg->ollamaHeavyModel, $status['models'], true)
 				|| count(array_filter($status['models'], fn($m) => str_contains($m, $cfg->ollamaHeavyModel))) > 0;
 			out("  Heavy ({$cfg->ollamaHeavyModel}): " . ($heavyOk ? '✓' : '✗ NOT FOUND (optional)'));
 		}
 
-		// Check optional specialist model
-		if ($cfg->hasSpecialistModel()) {
-			$specOk = in_array($cfg->ollamaSpecialistModel, $status['models'], true)
-				|| count(array_filter($status['models'], fn($m) => str_contains($m, $cfg->ollamaSpecialistModel))) > 0;
-			out("  Specialist ({$cfg->ollamaSpecialistModel}): " . ($specOk ? '✓' : '✗ NOT FOUND (optional)'));
-		}
-
-		// Env var hints
 		$envVars = $client->getRecommendedEnvVars();
 		out("\n  Recommended Ollama env vars:");
 		foreach ($envVars as $k => $v) {
@@ -264,6 +261,25 @@ function cmdTestConnections(Config $cfg): void
 		}
 	} else {
 		out("✗ Ollama: " . ($status['error'] ?? 'not connected'));
+	}
+
+	// RAG embedding model
+	try {
+		$kb = KnowledgeBase::fromConfig($cfg);
+		$ragStatus = $kb->testConnection();
+		if ($ragStatus['connected']) {
+			out("\n✓ RAG embedding ({$cfg->ragEmbeddingModel}): connected ({$ragStatus['dimensions']}d vectors)");
+			out("  Indexed chunks: {$kb->chunkCount()}");
+			$docs = $kb->listDocuments();
+			foreach ($docs as $d) {
+				out("    {$d['doc_id']}: {$d['chunks']} chunks");
+			}
+		} else {
+			out("\n✗ RAG embedding ({$cfg->ragEmbeddingModel}): " . ($ragStatus['error'] ?? 'not connected'));
+			out("  Run: ollama pull {$cfg->ragEmbeddingModel}");
+		}
+	} catch (\Throwable $e) {
+		out("\n✗ RAG: " . $e->getMessage());
 	}
 
 	// REMnux SSH
@@ -376,59 +392,136 @@ function cmdReport(Config $cfg, string $caseId): void
 	];
 
 	foreach ($state['iocs'] ?? [] as $ioc) {
-		$lines[] = sprintf(
-			"- **%s**: `%s` (confidence: %s, source: %s)",
-			$ioc['type'], $ioc['value'],
-			$ioc['confidence'] ?? '?', $ioc['source_tool'] ?? '?',
-		);
+		$lines[] = sprintf("- **%s**: `%s` (confidence: %s, source: %s)",
+						   $ioc['type'], $ioc['value'], $ioc['confidence'] ?? '?', $ioc['source_tool'] ?? '?');
 	}
 
 	$lines[] = "\n## TTPs (ATT&CK)";
-	foreach ($state['ttps'] ?? [] as $ttp) {
-		$lines[] = "- {$ttp}";
-	}
+	foreach ($state['ttps'] ?? [] as $ttp) { $lines[] = "- {$ttp}"; }
 
 	$lines[] = "\n## Attribution Candidates";
 	$actorFile = "{$case->derivedDir}/actor_rankings.json";
 	if (file_exists($actorFile)) {
 		$rankings = json_decode(file_get_contents($actorFile), true) ?: [];
 		foreach ($rankings as $r) {
-			$lines[] = sprintf(
-				"- **%s**: match=%d, conflicts=%d, confidence=%s",
-				$r['actor'], $r['match_score'], $r['conflict_score'], $r['confidence'],
-			);
+			$lines[] = sprintf("- **%s**: match=%d, conflicts=%d, confidence=%s",
+							   $r['actor'], $r['match_score'], $r['conflict_score'], $r['confidence']);
 		}
 	}
 
 	$lines[] = "\n## Hypotheses";
 	foreach ($state['hypotheses'] ?? [] as $h) {
 		$lines[] = "- [{$h['status']}] {$h['statement']}";
-		foreach ($h['supporting_evidence'] ?? [] as $s) {
-			$lines[] = "  - Supporting: {$s}";
-		}
+		foreach ($h['supporting_evidence'] ?? [] as $s) { $lines[] = "  - Supporting: {$s}"; }
 	}
 
 	$lines[] = "\n## Recommended Containment Pivots";
 	$lines[] = "(Fill in: domains, IPs, scheduled tasks, registry keys, etc.)\n";
-
 	$lines[] = "## Evidence Ledger (last 10 tool runs)";
 	foreach (array_slice($ledger, -10) as $e) {
 		$status  = $e['exit_code'] === 0 ? '✓' : '✗';
 		$lines[] = "- {$status} {$e['tool_name']} at " . substr($e['timestamp'], 0, 19);
 	}
 
-	$report = implode("\n", $lines);
+	$report     = implode("\n", $lines);
 	$reportPath = "{$case->notesDir}/blue_team_report.md";
 	file_put_contents($reportPath, $report);
 	out($report);
 	out("\nSaved to: {$reportPath}");
 }
 
+// ── Knowledge base commands ──────────────────────────────────────
+
+function cmdKbIndex(Config $cfg): void
+{
+	$kb  = KnowledgeBase::fromConfig($cfg);
+	$dir = $cfg->ragKnowledgeDir;
+
+	if (!is_dir($dir)) {
+		out("Knowledge directory not found: {$dir}");
+		out("Create it and add scenario CTI files (.md, .txt).");
+		return;
+	}
+
+	out("Indexing all files in {$dir}...\n");
+	$results = $kb->ingestDirectory($dir);
+
+	if (empty($results)) {
+		out("No indexable files found (.txt, .md) in {$dir}");
+		return;
+	}
+
+	$totalChunks = 0;
+	foreach ($results as $docId => $chunks) {
+		out(sprintf("  %-30s %d chunks", $docId, $chunks));
+		$totalChunks += $chunks;
+	}
+	out("\nIndexed {$totalChunks} chunks from " . count($results) . " documents.");
+	out("The agent can now use knowledge_search to query scenario CTI.");
+}
+
+function cmdKbIngest(Config $cfg, string $filePath, string $docId): void
+{
+	$kb = KnowledgeBase::fromConfig($cfg);
+	out("Indexing {$filePath} as '{$docId}'...");
+	$chunks = $kb->ingestFile($filePath, $docId);
+	out("Indexed {$chunks} chunks.");
+}
+
+function cmdKbSearch(Config $cfg, string $query): void
+{
+	$kb = KnowledgeBase::fromConfig($cfg);
+
+	if ($kb->chunkCount() === 0) {
+		out("Knowledge base is empty. Run: php dfirbus.php kb-index");
+		return;
+	}
+
+	out("Searching: \"{$query}\"\n");
+	$results = $kb->search($query, $cfg->ragTopK);
+
+	if (empty($results)) {
+		out("No results found.");
+		return;
+	}
+
+	foreach ($results as $r) {
+		$score = round($r['score'], 3);
+		$type  = $r['metadata']['type'] ?? '?';
+		out("[{$r['id']}] score={$score} type={$type}");
+		out("  " . mb_substr($r['text'], 0, 200));
+		out("");
+	}
+}
+
+function cmdKbList(Config $cfg): void
+{
+	$kb   = KnowledgeBase::fromConfig($cfg);
+	$docs = $kb->listDocuments();
+
+	if (empty($docs)) {
+		out("Knowledge base is empty.");
+		return;
+	}
+
+	out("Indexed documents (" . count($docs) . "):\n");
+	foreach ($docs as $d) {
+		out(sprintf("  %-30s %d chunks", $d['doc_id'], $d['chunks']));
+	}
+	out("\nTotal chunks: " . $kb->chunkCount());
+}
+
+function cmdKbClear(Config $cfg): void
+{
+	$kb = KnowledgeBase::fromConfig($cfg);
+	$kb->clear();
+	out("Knowledge base cleared.");
+}
+
 // ── Main ─────────────────────────────────────────────────────────
 
 $configPath = getConfigPath($argv);
 
-// Strip --config args from argv for cleaner parsing
 $cleanArgv = [];
 $skipNext  = false;
 foreach ($argv as $i => $arg) {
@@ -444,7 +537,6 @@ if ($command === '' || $command === 'help' || $command === '--help') {
 	usage();
 }
 
-// Commands that don't need config loaded
 if ($command === 'init-config') {
 	cmdInitConfig();
 	exit(0);
@@ -453,22 +545,27 @@ if ($command === 'init-config') {
 $cfg = Config::load($configPath);
 
 match ($command) {
-	'new-case'    => cmdNewCase($cfg, $cleanArgv[2] ?? throw new \InvalidArgumentException('Missing case_id')),
-	'ingest'      => cmdIngest($cfg, $cleanArgv[2] ?? throw new \InvalidArgumentException('Missing case_id'), $cleanArgv[3] ?? throw new \InvalidArgumentException('Missing path')),
-	'run'         => cmdRun($cfg, $cleanArgv[2] ?? throw new \InvalidArgumentException('Missing case_id'), $cleanArgv[3] ?? throw new \InvalidArgumentException('Missing adapter'), array_slice($cleanArgv, 4)),
-	'list-adapters'     => cmdListAdapters(),
-	'list-files'        => cmdListFiles($cfg, $cleanArgv[2] ?? throw new \InvalidArgumentException('Missing case_id')),
-	'status'            => cmdStatus($cfg, $cleanArgv[2] ?? throw new \InvalidArgumentException('Missing case_id')),
-	'ledger'            => cmdLedger($cfg, $cleanArgv[2] ?? throw new \InvalidArgumentException('Missing case_id')),
-	'test-connections'  => cmdTestConnections($cfg),
-	'triage'            => cmdTriage($cfg, $cleanArgv[2] ?? throw new \InvalidArgumentException('Missing case_id')),
-	'agent'             => cmdAgent($cfg, $cleanArgv[2] ?? throw new \InvalidArgumentException('Missing case_id'), implode(' ', array_slice($cleanArgv, 3))),
-	'agent-auto'        => cmdAgentAuto(
+	'new-case'         => cmdNewCase($cfg, $cleanArgv[2] ?? throw new \InvalidArgumentException('Missing case_id')),
+	'ingest'           => cmdIngest($cfg, $cleanArgv[2] ?? throw new \InvalidArgumentException('Missing case_id'), $cleanArgv[3] ?? throw new \InvalidArgumentException('Missing path')),
+	'run'              => cmdRun($cfg, $cleanArgv[2] ?? throw new \InvalidArgumentException('Missing case_id'), $cleanArgv[3] ?? throw new \InvalidArgumentException('Missing adapter'), array_slice($cleanArgv, 4)),
+	'list-adapters'    => cmdListAdapters(),
+	'list-files'       => cmdListFiles($cfg, $cleanArgv[2] ?? throw new \InvalidArgumentException('Missing case_id')),
+	'status'           => cmdStatus($cfg, $cleanArgv[2] ?? throw new \InvalidArgumentException('Missing case_id')),
+	'ledger'           => cmdLedger($cfg, $cleanArgv[2] ?? throw new \InvalidArgumentException('Missing case_id')),
+	'test-connections' => cmdTestConnections($cfg),
+	'triage'           => cmdTriage($cfg, $cleanArgv[2] ?? throw new \InvalidArgumentException('Missing case_id')),
+	'agent'            => cmdAgent($cfg, $cleanArgv[2] ?? throw new \InvalidArgumentException('Missing case_id'), implode(' ', array_slice($cleanArgv, 3))),
+	'agent-auto'       => cmdAgentAuto(
 		$cfg,
 		$cleanArgv[2] ?? throw new \InvalidArgumentException('Missing case_id'),
 		implode(' ', array_filter(array_slice($cleanArgv, 3), fn($a) => !str_starts_with($a, '--max-cycles'))),
 		(int) (array_reduce($cleanArgv, fn($c, $a) => str_starts_with($a, '--max-cycles=') ? substr($a, 13) : $c, '10')),
 	),
-	'report' => cmdReport($cfg, $cleanArgv[2] ?? throw new \InvalidArgumentException('Missing case_id')),
-	default  => (function () use ($command) { err("Unknown command: {$command}"); usage(); })(),
+	'report'           => cmdReport($cfg, $cleanArgv[2] ?? throw new \InvalidArgumentException('Missing case_id')),
+	'kb-index'         => cmdKbIndex($cfg),
+	'kb-ingest'        => cmdKbIngest($cfg, $cleanArgv[2] ?? throw new \InvalidArgumentException('Missing file path'), $cleanArgv[3] ?? throw new \InvalidArgumentException('Missing doc_id')),
+	'kb-search'        => cmdKbSearch($cfg, implode(' ', array_slice($cleanArgv, 2))),
+	'kb-list'          => cmdKbList($cfg),
+	'kb-clear'         => cmdKbClear($cfg),
+	default            => (function () use ($command) { err("Unknown command: {$command}"); usage(); })(),
 };

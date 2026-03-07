@@ -34,13 +34,20 @@ final class Config
 	public float  $ollamaTemperature = 0.1;
 	public int    $ollamaTimeout = 120;
 
-	// Ollama advanced — tuning for 8 GB VRAM envelope
-	public string $ollamaKvCacheType = 'q8_0';      // Halves KV cache VRAM — critical for 8 GB card
-	public int    $ollamaContextLength = 8192;        // Safe default; 16384 feasible with q8_0 KV cache
-	public bool   $ollamaWorkerThinking = true;       // Qwen3 hybrid thinking mode for complex analysis
-	public bool   $ollamaJudgeThinking = false;       // Judge doesn't need chain-of-thought overhead
-	public string $ollamaHeavyModel = '';             // Optional: e.g. 'qwen3:14b' for complex reasoning tasks
-	public string $ollamaSpecialistModel = '';        // Optional: e.g. 'hf.co/cisco/Foundation-Sec-8B-Instruct-GGUF' for CTI
+	// Ollama advanced
+	public string $ollamaKvCacheType = 'q8_0';
+	public int    $ollamaContextLength = 8192;
+	public bool   $ollamaWorkerThinking = true;
+	public bool   $ollamaJudgeThinking = false;
+	public string $ollamaHeavyModel = '';
+	public string $ollamaSpecialistModel = '';
+
+	// RAG
+	public string $ragKnowledgeDir = 'knowledge';
+	public string $ragEmbeddingModel = 'nomic-embed-text';
+	public int    $ragChunkSize = 512;
+	public int    $ragChunkOverlap = 64;
+	public int    $ragTopK = 5;
 
 	// Paths
 	public string $casesRoot = 'cases';
@@ -87,6 +94,11 @@ final class Config
 			'ollama.judge_thinking'     => 'ollamaJudgeThinking',
 			'ollama.heavy_model'        => 'ollamaHeavyModel',
 			'ollama.specialist_model'   => 'ollamaSpecialistModel',
+			'rag.knowledge_dir'     => 'ragKnowledgeDir',
+			'rag.embedding_model'   => 'ragEmbeddingModel',
+			'rag.chunk_size'        => 'ragChunkSize',
+			'rag.chunk_overlap'     => 'ragChunkOverlap',
+			'rag.top_k'            => 'ragTopK',
 			'cases_root'            => 'casesRoot',
 			'yara_rules_dir'        => 'yaraRulesDir',
 			'max_tool_timeout'      => 'maxToolTimeout',
@@ -116,22 +128,25 @@ final class Config
 		return $cfg;
 	}
 
-	/** Whether the worker and judge share the same model (single-model dual-prompt mode). */
 	public function isSingleModelMode(): bool
 	{
 		return $this->ollamaWorkerModel === $this->ollamaJudgeModel;
 	}
 
-	/** Whether a heavier model is configured for complex reasoning tasks. */
 	public function hasHeavyModel(): bool
 	{
 		return $this->ollamaHeavyModel !== '' && $this->ollamaHeavyModel !== $this->ollamaWorkerModel;
 	}
 
-	/** Whether a security-specialist model is configured. */
 	public function hasSpecialistModel(): bool
 	{
 		return $this->ollamaSpecialistModel !== '';
+	}
+
+	/** Resolved path to the RAG vector index file. */
+	public function ragIndexPath(): string
+	{
+		return $this->ragKnowledgeDir . '/index.json';
 	}
 
 	public static function generateDefault(string $path = 'config.json'): void
@@ -165,6 +180,13 @@ final class Config
 				'judge_thinking'   => false,
 				'heavy_model'      => '',
 				'specialist_model' => '',
+			],
+			'rag' => [
+				'knowledge_dir'   => 'knowledge',
+				'embedding_model' => 'nomic-embed-text',
+				'chunk_size'      => 512,
+				'chunk_overlap'   => 64,
+				'top_k'           => 5,
 			],
 			'cases_root'       => 'cases',
 			'yara_rules_dir'   => 'yara-rules',

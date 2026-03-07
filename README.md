@@ -1,0 +1,238 @@
+# DFIR Copilot — Locked Shields Forensics Assistant
+
+A locally-run, evidence-led DFIR analysis orchestrator written in PHP 8.3+. The LLM never "does analysis" itself — it orchestrates deterministic tool runs, stores provenance, and produces hypotheses with explicit evidence pointers.
+
+**Zero dependencies.** No Composer, no frameworks. Just PHP + curl + ssh2.
+
+## Architecture
+
+```
+┌──────────────────────────────────────────────────────────────┐
+│  HOST (Linux)                                             │
+│                                                              │
+│  ┌─────────┐   ┌──────────────┐   ┌───────────────────────┐ │
+│  │  Ollama  │   │ dfirbus.php  │   │  Case Workspace       │ │
+│  │ Worker   │◄──┤  (CLI)       ├──►│  raw/ derived/ iocs/  │ │
+│  │ Judge    │   │              │   │  ledger.jsonl         │ │
+│  └─────────┘   └──────┬───────┘   └───────────────────────┘ │
+│                        │                                     │
+│            ┌───────────┼───────────┐                         │
+│            ▼           ▼           ▼                         │
+│     LocalExecutor  SSHExecutor  WinRMExecutor                │
+│     (host tools)   (php-ssh2)  (curl + SOAP)                │
+└──────────────────────────────────────────────────────────────┘
+         │                │                │
+         │           ┌────┴────┐     ┌─────┴─────┐
+         │           │ REMnux  │     │ FLARE-VM  │
+         │           │ strings │     │ PE tools  │
+         │           │ yara    │     │ .NET      │
+         │           │ capa    │     │ pestudio  │
+         │           │ vol3    │     └───────────┘
+         │           │ tshark  │
+         │           │ plaso   │
+         │           └─────────┘
+```
+
+## Prerequisites
+
+```bash
+# PHP 8.3+ with required extensions
+sudo apt install php8.3-cli php8.3-curl php8.3-ssh2 php8.3-mbstring
+
+# Verify
+php -v                    # Should show 8.3+
+php -m | grep -E 'curl|ssh2|mbstring|json'
+
+# Ollama
+curl -fsSL https://ollama.com/install.sh | sh
+ollama pull qwen2.5:14b   # Worker (fast, good tool calling)
+ollama pull qwen2.5:32b   # Judge (stronger reasoning)
+```
+
+## Quick Start
+
+```bash
+# 1. Generate config
+php dfirbus.php init-config
+# Edit config.json — set VM IPs, SSH key paths, model names
+
+# 2. Test connectivity
+php dfirbus.php test-connections
+
+# 3. Create a case and ingest evidence
+php dfirbus.php new-case challenge-01
+php dfirbus.php ingest challenge-01 /path/to/challenge/bundle/
+
+# 4. Run local triage (file IDs, entropy — no VMs needed)
+php dfirbus.php triage challenge-01
+
+# 5. Run specific adapters
+php dfirbus.php run challenge-01 file_id file_path=raw/suspicious.exe
+php dfirbus.php run challenge-01 strings_and_iocs file_path=raw/suspicious.exe
+php dfirbus.php run challenge-01 yara_scan file_path=raw/suspicious.exe
+php dfirbus.php run challenge-01 extract_iocs input_file=derived/suspicious_strings.txt
+php dfirbus.php run challenge-01 attack_map 'observations=["powershell execution","scheduled task persistence","dns tunneling"]'
+
+# 6. Run the agent (single worker + judge cycle)
+php dfirbus.php agent challenge-01 "Triage the malware sample and identify C2 infrastructure"
+
+# 7. Auto-pilot mode (repeats until judge approves)
+php dfirbus.php agent-auto challenge-01 "Full analysis and attribution" --max-cycles=10
+
+# 8. Generate blue-team report
+php dfirbus.php report challenge-01
+```
+
+## Adapters
+
+| Adapter | Target | Description |
+|---------|--------|-------------|
+| `intake_bundle` | local | Ingest + hash evidence |
+| `file_id` | local | File type, hashes, entropy |
+| `extract_iocs` | local | Parse IOCs from text files |
+| `attack_map` | local | Map observations → ATT&CK |
+| `actor_rank` | local | Rank actors from scenario CTI |
+| `strings_and_iocs` | remnux | Extract strings via SSH (php-ssh2) |
+| `yara_scan` | remnux | YARA rule scanning |
+| `capa_scan` | remnux | Binary capability analysis |
+| `vol3_triage` | remnux | Volatility 3 memory triage |
+| `timeline_build` | remnux | Plaso super timeline |
+| `pcap_summary` | remnux | PCAP network extraction (tshark) |
+| `pe_quicklook` | flare | PE metadata via WinRM |
+
+## Project Structure
+
+```
+dfir-copilot/
+├── dfirbus.php              ← Single CLI entry point
+├── autoload.php             ← PSR-4 autoloader (no Composer)
+├── config.json              ← Your config (generated by init-config)
+├── src/
+│   ├── Config.php           ← Configuration loader
+│   ├── Case/
+│   │   └── Workspace.php    ← Case directory + provenance ledger
+│   ├── Executors/
+│   │   ├── ExecResult.php   ← Standardised execution result
+│   │   ├── LocalExecutor.php← Host-side command execution
+│   │   ├── SSHExecutor.php  ← REMnux via php-ssh2 + SFTP
+│   │   └── WinRMExecutor.php← FLARE-VM via curl + WinRM SOAP
+│   ├── Adapters/
+│   │   ├── BaseAdapter.php  ← Base class + registry
+│   │   ├── HostAdapters.php ← intake, file_id, iocs, attack_map, actor_rank
+│   │   ├── REMnuxAdapters.php ← strings, yara, capa, vol3, plaso, pcap
+│   │   └── FLAREAdapters.php  ← pe_quicklook
+│   └── Agent/
+│       ├── OllamaClient.php ← Ollama API via native curl
+│       └── AgentLoop.php    ← Worker + judge architecture
+├── cases/                   ← Case workspaces (created at runtime)
+├── knowledge/               ← Scenario CTI for RAG (Phase 3)
+└── yara-rules/              ← Your curated YARA rulesets
+```
+
+## VM Setup
+
+### REMnux (SSH via php-ssh2)
+```bash
+# On REMnux:
+sudo systemctl enable ssh && sudo systemctl start ssh
+mkdir -p /tmp/dfirbus
+
+# On your host — generate and install SSH key:
+ssh-keygen -t ed25519 -f keys/remnux_ed25519 -N ""
+ssh-copy-id -i keys/remnux_ed25519.pub remnux@192.168.56.10
+
+# Verify from host:
+php -r "
+  \$c = ssh2_connect('192.168.56.10', 22);
+  ssh2_auth_pubkey_file(\$c, 'remnux', 'keys/remnux_ed25519.pub', 'keys/remnux_ed25519');
+  \$s = ssh2_exec(\$c, 'echo ok');
+  stream_set_blocking(\$s, true);
+  echo stream_get_contents(\$s);
+"
+```
+
+### FLARE-VM (WinRM via curl)
+```powershell
+# On FLARE-VM (run as Administrator):
+Enable-PSRemoting -Force
+Set-Item WSMan:\localhost\Service\Auth\Basic -Value $true
+Set-Item WSMan:\localhost\Service\AllowUnencrypted -Value $true
+mkdir C:\dfirbus
+# Restrict WinRM to host-only network adapter only
+```
+
+### KVM/libvirt Setup (TuxedoOS)
+```bash
+# Install
+sudo apt install qemu-kvm libvirt-daemon-system virt-manager
+
+# Create host-only network for VMs
+virsh net-define /dev/stdin <<EOF
+<network>
+  <name>dfir-isolated</name>
+  <bridge name="virbr-dfir"/>
+  <ip address="192.168.56.1" netmask="255.255.255.0">
+    <dhcp>
+      <range start="192.168.56.10" end="192.168.56.50"/>
+    </dhcp>
+  </ip>
+</network>
+EOF
+virsh net-start dfir-isolated
+virsh net-autostart dfir-isolated
+```
+
+## Configuration (config.json)
+
+Generated by `php dfirbus.php init-config`. Key settings:
+
+```json
+{
+  "remnux": {
+    "host": "192.168.56.10",
+    "user": "remnux",
+    "key_file": "keys/remnux_ed25519",
+    "port": 22
+  },
+  "flare": {
+    "host": "192.168.56.11",
+    "user": "flare",
+    "password": "flare",
+    "shared_host_path": "/home/you/shared-flare",
+    "shared_vm_path": "Z:\\"
+  },
+  "ollama": {
+    "worker_model": "qwen2.5:14b",
+    "judge_model": "qwen2.5:32b"
+  }
+}
+```
+
+## How the Agent Works
+
+1. **Worker model** gets the current case state (files, IOCs, tools already run, hypotheses)
+2. Worker decides which adapter to call next via Ollama tool calling
+3. Adapter executes on the correct target (local/REMnux/FLARE) — the model never runs arbitrary commands
+4. Results go back to the worker, who extracts findings and calls more tools or proposes conclusions
+5. **Judge model** reviews: rejects claims without evidence pointers, demands alternative hypotheses, flags missing triage steps
+6. If rejected → required actions feed back to the worker → loop continues
+
+## Safety
+
+- The LLM **never** runs arbitrary shell commands — only whitelisted adapters
+- Every tool run is logged with full provenance (command, inputs, outputs, hashes, timing)
+- All samples treated as hostile: no auto-execution, no read-write mounting
+- Keep the system offline during the exercise unless rules explicitly allow otherwise
+- The provenance ledger (`ledger.jsonl`) doubles as your after-action notes
+
+## Extending
+
+To add a new adapter:
+
+1. Create a class extending `BaseAdapter` in the appropriate file
+2. Define `NAME`, `VERSION`, `DESCRIPTION`, `TARGET` constants
+3. Implement `getToolSchema()` (Ollama function-calling format)
+4. Implement `execute()` — use the appropriate executor
+5. Register it in `dfirbus.php`'s `registerAllAdapters()`
+
+The agent will automatically see the new tool in its next cycle.

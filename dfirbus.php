@@ -1,0 +1,431 @@
+#!/usr/bin/env php
+<?php
+
+declare(strict_types=1);
+
+require_once __DIR__ . '/autoload.php';
+
+use DFIRCopilot\Config;
+use DFIRCopilot\Case\Workspace;
+use DFIRCopilot\Adapters\AdapterRegistry;
+use DFIRCopilot\Adapters\{IntakeBundle, FileID, ExtractIOCs, ATTACKMap, ActorRank};
+use DFIRCopilot\Adapters\{StringsAndIOCs, YARAScan, CapaScan, Vol3Triage, TimelineBuild, PCAPSummary};
+use DFIRCopilot\Adapters\PEQuicklook;
+use DFIRCopilot\Agent\{OllamaClient, AgentLoop};
+use DFIRCopilot\Executors\SSHExecutor;
+use DFIRCopilot\Executors\WinRMExecutor;
+
+// ── Adapter registration ─────────────────────────────────────────
+
+function registerAllAdapters(): void
+{
+	AdapterRegistry::register(new IntakeBundle());
+	AdapterRegistry::register(new FileID());
+	AdapterRegistry::register(new ExtractIOCs());
+	AdapterRegistry::register(new ATTACKMap());
+	AdapterRegistry::register(new ActorRank());
+	AdapterRegistry::register(new StringsAndIOCs());
+	AdapterRegistry::register(new YARAScan());
+	AdapterRegistry::register(new CapaScan());
+	AdapterRegistry::register(new Vol3Triage());
+	AdapterRegistry::register(new TimelineBuild());
+	AdapterRegistry::register(new PCAPSummary());
+	AdapterRegistry::register(new PEQuicklook());
+}
+
+// ── CLI helpers ──────────────────────────────────────────────────
+
+function out(string $msg): void { echo $msg . "\n"; }
+function err(string $msg): void { fwrite(STDERR, $msg . "\n"); }
+
+function getConfigPath(array $argv): string
+{
+	// Check for --config=path or --config path
+	for ($i = 0; $i < count($argv); $i++) {
+		if (str_starts_with($argv[$i], '--config=')) {
+			return substr($argv[$i], 9);
+		}
+		if ($argv[$i] === '--config' && isset($argv[$i + 1])) {
+			return $argv[$i + 1];
+		}
+	}
+	return 'config.json';
+}
+
+function usage(): never
+{
+	out(<<<'USAGE'
+DFIR Copilot — Locked Shields Forensics Assistant
+
+Usage: php dfirbus.php <command> [options]
+
+Commands:
+  init-config                       Generate default config.json
+  new-case <case_id>                Create a new case workspace
+  ingest <case_id> <path>           Ingest evidence bundle
+  run <case_id> <adapter> [args]    Run a specific adapter (args: key=value)
+  list-adapters                     List all available adapters
+  list-files <case_id>              List raw files in a case
+  status <case_id>                  Show case state
+  ledger <case_id>                  Show provenance ledger
+  test-connections                  Test VM and Ollama connectivity
+  triage <case_id>                  Run local triage on all files
+  agent <case_id> [instruction]     Run one worker+judge cycle
+  agent-auto <case_id> [instruction] [--max-cycles=N]  Auto-pilot
+  report <case_id>                  Generate blue-team report
+
+Global options:
+  --config=<path>                   Config file (default: config.json)
+USAGE);
+	exit(1);
+}
+
+// ── Commands ─────────────────────────────────────────────────────
+
+function cmdInitConfig(): void
+{
+	Config::generateDefault('config.json');
+	out("Generated config.json");
+	out("Edit this file to set your VM IPs, SSH keys, model preferences.");
+}
+
+function cmdNewCase(Config $cfg, string $caseId): void
+{
+	$case = new Workspace($cfg->casesRoot, $caseId);
+	$case->create();
+	out("Created case workspace: {$case->caseDir}");
+	out("  raw/       — place evidence here (or use 'ingest')");
+	out("  derived/   — tool outputs");
+	out("  iocs/      — extracted IOCs");
+	out("  notes/     — your notes + actor profiles");
+	out("  timelines/ — generated timelines");
+}
+
+function cmdIngest(Config $cfg, string $caseId, string $path): void
+{
+	$case = new Workspace($cfg->casesRoot, $caseId);
+	if (!is_dir($case->caseDir)) $case->create();
+
+	$inventory = $case->ingestBundle($path);
+	$count     = count($inventory['files']);
+	out("Ingested {$count} files into {$case->rawDir}");
+
+	foreach (array_slice($inventory['files'], 0, 20) as $f) {
+		$name = $f['relative_path'] ?? $f['stored_as'] ?? '?';
+		out("  {$name} ({$f['size_bytes']} bytes)");
+	}
+	if ($count > 20) out("  ... and " . ($count - 20) . " more");
+}
+
+function cmdRun(Config $cfg, string $caseId, string $adapterName, array $rawArgs): void
+{
+	registerAllAdapters();
+	$case    = new Workspace($cfg->casesRoot, $caseId);
+	$adapter = AdapterRegistry::get($adapterName);
+
+	if ($adapter === null) {
+		$available = array_column(AdapterRegistry::list(), 'name');
+		err("Unknown adapter: {$adapterName}");
+		err("Available: " . implode(', ', $available));
+		exit(1);
+	}
+
+	// Parse key=value args
+	$params = [];
+	foreach ($rawArgs as $arg) {
+		if (str_contains($arg, '=')) {
+			[$k, $v] = explode('=', $arg, 2);
+			// Try JSON decode for arrays/objects
+			$decoded = json_decode($v, true);
+			$params[$k] = $decoded !== null ? $decoded : $v;
+		}
+	}
+
+	out("Running {$adapterName} on {$adapter::TARGET}...");
+	$result = $adapter->run($case, $cfg, $params);
+
+	out("\nSuccess: " . ($result->success ? 'yes' : 'no'));
+	if ($result->error !== '') out("Error: {$result->error}");
+	out("Produced files: " . implode(', ', $result->producedFiles));
+	out("\nStructured results:");
+	out(mb_substr(json_encode($result->structuredResults, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES), 0, 3000));
+
+	if (!empty($result->evidencePointers)) {
+		out("\nEvidence pointers:");
+		foreach (array_slice($result->evidencePointers, 0, 15) as $ep) {
+			out("  {$ep}");
+		}
+	}
+}
+
+function cmdListAdapters(): void
+{
+	registerAllAdapters();
+	$adapters = AdapterRegistry::list();
+	out("Available adapters (" . count($adapters) . "):\n");
+	foreach ($adapters as $a) {
+		out(sprintf("  %-25s [%-7s]  %s", $a['name'], $a['target'], mb_substr($a['description'], 0, 60)));
+	}
+}
+
+function cmdListFiles(Config $cfg, string $caseId): void
+{
+	$case  = new Workspace($cfg->casesRoot, $caseId);
+	$files = $case->listRawFiles();
+	out("Raw files in {$caseId} (" . count($files) . "):");
+	foreach ($files as $f) {
+		out(sprintf("  %-50s %10.1f KB", $f['path'], $f['size_bytes'] / 1024));
+	}
+}
+
+function cmdStatus(Config $cfg, string $caseId): void
+{
+	$case = new Workspace($cfg->casesRoot, $caseId);
+	out(json_encode($case->getState(), JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES));
+}
+
+function cmdLedger(Config $cfg, string $caseId): void
+{
+	$case    = new Workspace($cfg->casesRoot, $caseId);
+	$entries = $case->getLedger();
+	out("Provenance ledger (" . count($entries) . " entries):\n");
+	foreach ($entries as $e) {
+		$status = $e['exit_code'] === 0 ? '✓' : '✗';
+		out(sprintf("  %s %s  %-25s  %ss",
+					$status,
+					substr($e['timestamp'], 0, 19),
+					$e['tool_name'],
+					$e['duration_seconds'] ?? '?',
+        ));
+		if (!empty($e['stderr_excerpt'])) {
+			out("    stderr: " . mb_substr($e['stderr_excerpt'], 0, 100));
+		}
+	}
+}
+
+function cmdTestConnections(Config $cfg): void
+{
+	out("Testing connections...\n");
+
+	// Ollama
+	$client = OllamaClient::fromConfig($cfg);
+	$status = $client->testConnection();
+	if ($status['connected']) {
+		out("✓ Ollama: connected");
+		out("  Models: " . implode(', ', array_slice($status['models'], 0, 10)));
+		$workerOk = in_array($cfg->ollamaWorkerModel, $status['models'], true)
+			|| count(array_filter($status['models'], fn($m) => str_contains($m, $cfg->ollamaWorkerModel))) > 0;
+		$judgeOk = in_array($cfg->ollamaJudgeModel, $status['models'], true)
+			|| count(array_filter($status['models'], fn($m) => str_contains($m, $cfg->ollamaJudgeModel))) > 0;
+		out("  Worker ({$cfg->ollamaWorkerModel}): " . ($workerOk ? '✓' : '✗ NOT FOUND'));
+		out("  Judge ({$cfg->ollamaJudgeModel}): " . ($judgeOk ? '✓' : '✗ NOT FOUND'));
+	} else {
+		out("✗ Ollama: " . ($status['error'] ?? 'not connected'));
+	}
+
+	// REMnux SSH
+	try {
+		$ssh = SSHExecutor::fromConfig($cfg);
+		if ($ssh->testConnection()) {
+			out("\n✓ REMnux SSH: connected ({$cfg->remnuxHost})");
+			foreach (['strings', 'yara', 'capa', 'vol', 'tshark', 'log2timeline.py'] as $tool) {
+				$r = $ssh->run("which {$tool} 2>/dev/null || echo 'NOT FOUND'");
+				$found = !str_contains($r->stdout, 'NOT FOUND');
+				out("  " . ($found ? '✓' : '✗') . " {$tool}: " . mb_substr(trim($r->stdout), 0, 80));
+			}
+		} else {
+			out("\n✗ REMnux SSH: cannot connect to {$cfg->remnuxHost}");
+		}
+	} catch (\Throwable $e) {
+		out("\n✗ REMnux SSH: " . $e->getMessage());
+	}
+
+	// FLARE-VM WinRM
+	try {
+		$winrm = WinRMExecutor::fromConfig($cfg);
+		if ($winrm->testConnection()) {
+			out("\n✓ FLARE-VM WinRM: connected ({$cfg->flareHost})");
+		} else {
+			out("\n✗ FLARE-VM WinRM: cannot connect to {$cfg->flareHost}");
+		}
+	} catch (\Throwable $e) {
+		out("\n✗ FLARE-VM WinRM: " . $e->getMessage());
+	}
+}
+
+function cmdTriage(Config $cfg, string $caseId): void
+{
+	registerAllAdapters();
+	$case  = new Workspace($cfg->casesRoot, $caseId);
+	$files = $case->listRawFiles();
+
+	if (empty($files)) {
+		out("No files in raw/. Ingest evidence first.");
+		return;
+	}
+
+	out("Running local triage on " . count($files) . " files...\n");
+
+	$fileId = AdapterRegistry::get('file_id');
+
+	foreach ($files as $f) {
+		out("\n--- {$f['name']} ({$f['size_bytes']} bytes) ---");
+
+		$result = $fileId->run($case, $cfg, ['file_path' => $f['path']]);
+		$r      = $result->structuredResults;
+		out("  Type:    " . ($r['magic'] ?? 'unknown'));
+		out("  SHA256:  " . mb_substr($r['sha256'] ?? '?', 0, 16) . "...");
+		out("  Entropy: " . ($r['entropy'] ?? '?'));
+
+		if ($r['is_pe'] ?? false)  out("  → PE binary detected. Run: strings_and_iocs, yara_scan, pe_quicklook");
+		if ($r['is_elf'] ?? false) out("  → ELF binary detected. Run: strings_and_iocs, yara_scan, capa_scan");
+	}
+
+	out("\n\nLocal triage complete.");
+	out("Remote adapters (REMnux/FLARE) need VM connectivity.");
+	out("Run 'test-connections' to verify, then run individual adapters.");
+}
+
+function cmdAgent(Config $cfg, string $caseId, string $instruction): void
+{
+	registerAllAdapters();
+	$case  = new Workspace($cfg->casesRoot, $caseId);
+	$agent = new AgentLoop($cfg, $case);
+
+	$result = $agent->runFullCycle($instruction);
+
+	out("\n" . str_repeat('=', 60));
+	out("WORKER ANALYSIS:");
+	out(str_repeat('=', 60));
+	out($result['worker_analysis']);
+	out("\n" . str_repeat('=', 60));
+	out("JUDGE VERDICT:");
+	out(str_repeat('=', 60));
+	out(json_encode($result['judge_verdict'], JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES));
+}
+
+function cmdAgentAuto(Config $cfg, string $caseId, string $instruction, int $maxCycles): void
+{
+	registerAllAdapters();
+	$case  = new Workspace($cfg->casesRoot, $caseId);
+	$agent = new AgentLoop($cfg, $case);
+
+	$results = $agent->runAuto($instruction, $maxCycles);
+
+	out("\nCompleted " . count($results) . " cycles.");
+	$reportPath = "{$case->notesDir}/agent_run.json";
+	file_put_contents($reportPath, json_encode($results, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES));
+	out("Full results saved to: {$reportPath}");
+}
+
+function cmdReport(Config $cfg, string $caseId): void
+{
+	$case   = new Workspace($cfg->casesRoot, $caseId);
+	$state  = $case->getState();
+	$ledger = $case->getLedger();
+
+	$lines = [
+		"# DFIR Report: {$caseId}",
+		"Generated from " . count($ledger) . " tool runs\n",
+		"## Summary",
+		"(Fill in after analysis)\n",
+		"## IOCs",
+	];
+
+	foreach ($state['iocs'] ?? [] as $ioc) {
+		$lines[] = sprintf(
+			"- **%s**: `%s` (confidence: %s, source: %s)",
+			$ioc['type'], $ioc['value'],
+			$ioc['confidence'] ?? '?', $ioc['source_tool'] ?? '?',
+        );
+	}
+
+	$lines[] = "\n## TTPs (ATT&CK)";
+	foreach ($state['ttps'] ?? [] as $ttp) {
+		$lines[] = "- {$ttp}";
+	}
+
+	$lines[] = "\n## Attribution Candidates";
+	$actorFile = "{$case->derivedDir}/actor_rankings.json";
+	if (file_exists($actorFile)) {
+		$rankings = json_decode(file_get_contents($actorFile), true) ?: [];
+		foreach ($rankings as $r) {
+			$lines[] = sprintf(
+				"- **%s**: match=%d, conflicts=%d, confidence=%s",
+				$r['actor'], $r['match_score'], $r['conflict_score'], $r['confidence'],
+            );
+		}
+	}
+
+	$lines[] = "\n## Hypotheses";
+	foreach ($state['hypotheses'] ?? [] as $h) {
+		$lines[] = "- [{$h['status']}] {$h['statement']}";
+		foreach ($h['supporting_evidence'] ?? [] as $s) {
+			$lines[] = "  - Supporting: {$s}";
+		}
+	}
+
+	$lines[] = "\n## Recommended Containment Pivots";
+	$lines[] = "(Fill in: domains, IPs, scheduled tasks, registry keys, etc.)\n";
+
+	$lines[] = "## Evidence Ledger (last 10 tool runs)";
+	foreach (array_slice($ledger, -10) as $e) {
+		$status  = $e['exit_code'] === 0 ? '✓' : '✗';
+		$lines[] = "- {$status} {$e['tool_name']} at " . substr($e['timestamp'], 0, 19);
+	}
+
+	$report = implode("\n", $lines);
+	$reportPath = "{$case->notesDir}/blue_team_report.md";
+	file_put_contents($reportPath, $report);
+	out($report);
+	out("\nSaved to: {$reportPath}");
+}
+
+// ── Main ─────────────────────────────────────────────────────────
+
+$configPath = getConfigPath($argv);
+
+// Strip --config args from argv for cleaner parsing
+$cleanArgv = [];
+$skipNext  = false;
+foreach ($argv as $i => $arg) {
+	if ($skipNext) { $skipNext = false; continue; }
+	if ($arg === '--config') { $skipNext = true; continue; }
+	if (str_starts_with($arg, '--config=')) continue;
+	$cleanArgv[] = $arg;
+}
+
+$command = $cleanArgv[1] ?? '';
+
+if ($command === '' || $command === 'help' || $command === '--help') {
+	usage();
+}
+
+// Commands that don't need config loaded
+if ($command === 'init-config') {
+	cmdInitConfig();
+	exit(0);
+}
+
+$cfg = Config::load($configPath);
+
+match ($command) {
+	'new-case'    => cmdNewCase($cfg, $cleanArgv[2] ?? throw new \InvalidArgumentException('Missing case_id')),
+	'ingest'      => cmdIngest($cfg, $cleanArgv[2] ?? throw new \InvalidArgumentException('Missing case_id'), $cleanArgv[3] ?? throw new \InvalidArgumentException('Missing path')),
+	'run'         => cmdRun($cfg, $cleanArgv[2] ?? throw new \InvalidArgumentException('Missing case_id'), $cleanArgv[3] ?? throw new \InvalidArgumentException('Missing adapter'), array_slice($cleanArgv, 4)),
+	'list-adapters'     => cmdListAdapters(),
+	'list-files'        => cmdListFiles($cfg, $cleanArgv[2] ?? throw new \InvalidArgumentException('Missing case_id')),
+	'status'            => cmdStatus($cfg, $cleanArgv[2] ?? throw new \InvalidArgumentException('Missing case_id')),
+	'ledger'            => cmdLedger($cfg, $cleanArgv[2] ?? throw new \InvalidArgumentException('Missing case_id')),
+	'test-connections'  => cmdTestConnections($cfg),
+	'triage'            => cmdTriage($cfg, $cleanArgv[2] ?? throw new \InvalidArgumentException('Missing case_id')),
+	'agent'             => cmdAgent($cfg, $cleanArgv[2] ?? throw new \InvalidArgumentException('Missing case_id'), implode(' ', array_slice($cleanArgv, 3))),
+	'agent-auto'        => cmdAgentAuto(
+		$cfg,
+		$cleanArgv[2] ?? throw new \InvalidArgumentException('Missing case_id'),
+		implode(' ', array_filter(array_slice($cleanArgv, 3), fn($a) => !str_starts_with($a, '--max-cycles'))),
+		(int) (array_reduce($cleanArgv, fn($c, $a) => str_starts_with($a, '--max-cycles=') ? substr($a, 13) : $c, '10')),
+    ),
+	'report' => cmdReport($cfg, $cleanArgv[2] ?? throw new \InvalidArgumentException('Missing case_id')),
+	default  => (function () use ($command) { err("Unknown command: {$command}"); usage(); })(),
+};

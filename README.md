@@ -94,41 +94,105 @@ export OLLAMA_NUM_PARALLEL=1             # Single request mode saves VRAM
 export OLLAMA_MAX_LOADED_MODELS=1        # Keep only one model loaded at a time
 ```
 
-## Quick Start
+## Setup Scripts
+
+The `scripts/` directory contains two helper scripts that handle environment setup and verification. Run them in order: KVM setup first (once, well before the exercise), preflight check on exercise day.
+
+### KVM/libvirt Setup — `scripts/setup-kvm.sh`
+
+Run this **once** on TuxedoOS to set up the VM infrastructure. It's idempotent, so re-running it is safe.
 
 ```bash
-# 1. Generate config
+sudo ./scripts/setup-kvm.sh
+```
+
+What it does:
+- Installs `qemu-kvm`, `libvirt-daemon-system`, `virt-manager`, and related packages if missing
+- Starts and enables `libvirtd`
+- Adds your user to the `libvirt` and `kvm` groups (requires logout/login to take effect)
+- Creates a `dfir-isolated` host-only network (bridge `virbr-dfir`, host IP `192.168.56.1`, DHCP range `.10`–`.50`)
+- Verifies KVM hardware acceleration is available
+
+After running, import your REMnux and FLARE-VM images via `virt-manager` and attach them to the `dfir-isolated` network. The bottom of the script has commented-out `virt-install` examples you can adapt for headless import.
+
+**When to run:** Any time before the exercise — ideally the day you set up TuxedoOS. Only needs to run once.
+
+### Exercise-Day Preflight — `scripts/preflight.php`
+
+Run this **on exercise day**, after VMs are booted and before the clock starts. It checks every dependency in one pass so you catch problems while you still have time to fix them.
+
+```bash
+php scripts/preflight.php
+# or with a custom config path:
+php scripts/preflight.php --config=/path/to/config.json
+```
+
+What it checks (in order):
+1. **Config** — `config.json` exists and loads
+2. **PHP** — version 8.3+, required extensions (`curl`, `mbstring`, `json`, `ssh2`)
+3. **Ollama** — reachable, worker/judge models pulled, recommended env vars set
+4. **RAG** — embedding model responds, knowledge base indexed with chunk counts
+5. **REMnux** — SSH connects, key tools present (`strings`, `yara`, `capa`, `vol`, `tshark`, `log2timeline.py`), work directory writable, disk space
+6. **FLARE-VM** — WinRM responds, shared folder exists (if configured)
+7. **Workspace** — host disk space, YARA rules present
+
+Output is colour-coded: green ✓ for pass, yellow ⚠ for warnings (non-blocking), red ✗ for failures (must-fix). Exits `0` if all critical checks pass, `1` if anything is broken.
+
+**When to run:** Exercise morning, after `ollama serve` is running and VMs are booted. Run it again if you change config or restart a VM.
+
+## Quick Start
+
+The full workflow from fresh install to running analysis:
+
+```bash
+# ── One-time setup (days/weeks before exercise) ──────────────
+
+# 1. Set up KVM (TuxedoOS only, run once)
+sudo ./scripts/setup-kvm.sh
+
+# 2. Import VMs via virt-manager, attach to dfir-isolated network
+
+# 3. Generate config and edit it
 php dfirbus.php init-config
 # Edit config.json — set VM IPs, SSH key paths, model names
 
-# 2. Test connectivity (Ollama, embedding model, SSH, WinRM)
-php dfirbus.php test-connections
+# 4. Pull models
+ollama pull qwen3:8b
+ollama pull nomic-embed-text
 
-# 3. Index scenario CTI into the knowledge base
+# ── Exercise day ─────────────────────────────────────────────
+
+# 5. Boot VMs, start Ollama, then run preflight
+ollama serve &
+php scripts/preflight.php
+
+# 6. Index scenario CTI into the knowledge base
 #    (Place .md/.txt files in knowledge/actors/, knowledge/scenario/, knowledge/notes/)
 php dfirbus.php kb-index
 
-# 4. Create a case and ingest evidence
+# 7. Create a case and ingest evidence
 php dfirbus.php new-case challenge-01
 php dfirbus.php ingest challenge-01 /path/to/challenge/bundle/
 
-# 5. Run local triage (file IDs, entropy — no VMs needed)
+# ── Analysis ─────────────────────────────────────────────────
+
+# 8. Run local triage (file IDs, entropy — no VMs needed)
 php dfirbus.php triage challenge-01
 
-# 6. Run specific adapters
+# 9. Run specific adapters
 php dfirbus.php run challenge-01 file_id file_path=raw/suspicious.exe
 php dfirbus.php run challenge-01 strings_and_iocs file_path=raw/suspicious.exe
 php dfirbus.php run challenge-01 yara_scan file_path=raw/suspicious.exe
 php dfirbus.php run challenge-01 extract_iocs input_file=derived/suspicious_strings.txt
 php dfirbus.php run challenge-01 attack_map 'observations=["powershell execution","scheduled task persistence","dns tunneling"]'
 
-# 7. Run the agent (single worker + judge cycle)
+# 10. Run the agent (single worker + judge cycle)
 php dfirbus.php agent challenge-01 "Triage the malware sample and identify C2 infrastructure"
 
-# 8. Auto-pilot mode (repeats until judge approves)
+# 11. Auto-pilot mode (repeats until judge approves)
 php dfirbus.php agent-auto challenge-01 "Full analysis and attribution" --max-cycles=10
 
-# 9. Generate blue-team report
+# 12. Generate blue-team report
 php dfirbus.php report challenge-01
 ```
 
@@ -243,6 +307,9 @@ dfir-copilot/
 ├── autoload.php             ← PSR-4 autoloader (no Composer)
 ├── config.json              ← Your config (generated by init-config)
 ├── .gitignore               ← Ignores cases/, keys/, config.json, index.json
+├── scripts/
+│   ├── setup-kvm.sh         ← KVM/libvirt setup (run once on TuxedoOS)
+│   └── preflight.php        ← Exercise-day connectivity + dependency check
 ├── src/
 │   ├── Config.php           ← Configuration loader
 │   ├── Case/
@@ -309,24 +376,11 @@ mkdir C:\dfirbus
 ```
 
 ### KVM/libvirt Setup (TuxedoOS)
-```bash
-# Install
-sudo apt install qemu-kvm libvirt-daemon-system virt-manager
 
-# Create host-only network for VMs
-virsh net-define /dev/stdin <<EOF
-<network>
-  <name>dfir-isolated</name>
-  <bridge name="virbr-dfir"/>
-  <ip address="192.168.56.1" netmask="255.255.255.0">
-    <dhcp>
-      <range start="192.168.56.10" end="192.168.56.50"/>
-    </dhcp>
-  </ip>
-</network>
-EOF
-virsh net-start dfir-isolated
-virsh net-autostart dfir-isolated
+Handled by the setup script — see [Setup Scripts](#setup-scripts) above.
+
+```bash
+sudo ./scripts/setup-kvm.sh
 ```
 
 ## Configuration (config.json)

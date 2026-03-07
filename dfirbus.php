@@ -87,6 +87,18 @@ function cmdInitConfig(): void
 	Config::generateDefault('config.json');
 	out("Generated config.json");
 	out("Edit this file to set your VM IPs, SSH keys, model preferences.");
+	out("");
+	out("Default model: qwen3:8b (single model for both worker + judge)");
+	out("Pull it:  ollama pull qwen3:8b");
+	out("");
+	out("Optional models:");
+	out("  Heavy reasoning:  ollama pull qwen3:14b       (set ollama.heavy_model)");
+	out("  Cyber specialist: import Foundation-Sec-8B     (set ollama.specialist_model)");
+	out("");
+	out("Recommended Ollama env vars for 8 GB VRAM:");
+	out("  export OLLAMA_KV_CACHE_TYPE=q8_0");
+	out("  export OLLAMA_NUM_PARALLEL=1");
+	out("  export OLLAMA_MAX_LOADED_MODELS=1");
 }
 
 function cmdNewCase(Config $cfg, string $caseId): void
@@ -196,7 +208,7 @@ function cmdLedger(Config $cfg, string $caseId): void
 					substr($e['timestamp'], 0, 19),
 					$e['tool_name'],
 					$e['duration_seconds'] ?? '?',
-        ));
+			));
 		if (!empty($e['stderr_excerpt'])) {
 			out("    stderr: " . mb_substr($e['stderr_excerpt'], 0, 100));
 		}
@@ -213,12 +225,43 @@ function cmdTestConnections(Config $cfg): void
 	if ($status['connected']) {
 		out("✓ Ollama: connected");
 		out("  Models: " . implode(', ', array_slice($status['models'], 0, 10)));
+
+		// Check worker model
 		$workerOk = in_array($cfg->ollamaWorkerModel, $status['models'], true)
 			|| count(array_filter($status['models'], fn($m) => str_contains($m, $cfg->ollamaWorkerModel))) > 0;
-		$judgeOk = in_array($cfg->ollamaJudgeModel, $status['models'], true)
-			|| count(array_filter($status['models'], fn($m) => str_contains($m, $cfg->ollamaJudgeModel))) > 0;
-		out("  Worker ({$cfg->ollamaWorkerModel}): " . ($workerOk ? '✓' : '✗ NOT FOUND'));
-		out("  Judge ({$cfg->ollamaJudgeModel}): " . ($judgeOk ? '✓' : '✗ NOT FOUND'));
+		out("  Worker ({$cfg->ollamaWorkerModel}): " . ($workerOk ? '✓' : '✗ NOT FOUND — run: ollama pull ' . $cfg->ollamaWorkerModel));
+
+		// Check judge model (may be same as worker in single-model mode)
+		if ($cfg->isSingleModelMode()) {
+			out("  Judge: same model (single-model dual-prompt mode) ✓");
+		} else {
+			$judgeOk = in_array($cfg->ollamaJudgeModel, $status['models'], true)
+				|| count(array_filter($status['models'], fn($m) => str_contains($m, $cfg->ollamaJudgeModel))) > 0;
+			out("  Judge ({$cfg->ollamaJudgeModel}): " . ($judgeOk ? '✓' : '✗ NOT FOUND — run: ollama pull ' . $cfg->ollamaJudgeModel));
+		}
+
+		// Check optional heavy model
+		if ($cfg->hasHeavyModel()) {
+			$heavyOk = in_array($cfg->ollamaHeavyModel, $status['models'], true)
+				|| count(array_filter($status['models'], fn($m) => str_contains($m, $cfg->ollamaHeavyModel))) > 0;
+			out("  Heavy ({$cfg->ollamaHeavyModel}): " . ($heavyOk ? '✓' : '✗ NOT FOUND (optional)'));
+		}
+
+		// Check optional specialist model
+		if ($cfg->hasSpecialistModel()) {
+			$specOk = in_array($cfg->ollamaSpecialistModel, $status['models'], true)
+				|| count(array_filter($status['models'], fn($m) => str_contains($m, $cfg->ollamaSpecialistModel))) > 0;
+			out("  Specialist ({$cfg->ollamaSpecialistModel}): " . ($specOk ? '✓' : '✗ NOT FOUND (optional)'));
+		}
+
+		// Env var hints
+		$envVars = $client->getRecommendedEnvVars();
+		out("\n  Recommended Ollama env vars:");
+		foreach ($envVars as $k => $v) {
+			$current = getenv($k) ?: '(not set)';
+			$match   = $current === $v ? '✓' : "✗ current={$current}";
+			out("    {$k}={$v}  {$match}");
+		}
 	} else {
 		out("✗ Ollama: " . ($status['error'] ?? 'not connected'));
 	}
@@ -337,7 +380,7 @@ function cmdReport(Config $cfg, string $caseId): void
 			"- **%s**: `%s` (confidence: %s, source: %s)",
 			$ioc['type'], $ioc['value'],
 			$ioc['confidence'] ?? '?', $ioc['source_tool'] ?? '?',
-        );
+		);
 	}
 
 	$lines[] = "\n## TTPs (ATT&CK)";
@@ -353,7 +396,7 @@ function cmdReport(Config $cfg, string $caseId): void
 			$lines[] = sprintf(
 				"- **%s**: match=%d, conflicts=%d, confidence=%s",
 				$r['actor'], $r['match_score'], $r['conflict_score'], $r['confidence'],
-            );
+			);
 		}
 	}
 
@@ -425,7 +468,7 @@ match ($command) {
 		$cleanArgv[2] ?? throw new \InvalidArgumentException('Missing case_id'),
 		implode(' ', array_filter(array_slice($cleanArgv, 3), fn($a) => !str_starts_with($a, '--max-cycles'))),
 		(int) (array_reduce($cleanArgv, fn($c, $a) => str_starts_with($a, '--max-cycles=') ? substr($a, 13) : $c, '10')),
-    ),
+	),
 	'report' => cmdReport($cfg, $cleanArgv[2] ?? throw new \InvalidArgumentException('Missing case_id')),
 	default  => (function () use ($command) { err("Unknown command: {$command}"); usage(); })(),
 };

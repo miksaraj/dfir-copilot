@@ -8,6 +8,26 @@ use DFIRCopilot\Adapters\AdapterRegistry;
 use DFIRCopilot\Case\Workspace;
 use DFIRCopilot\Config;
 
+/**
+ * Agentic worker → judge loop for DFIR analysis.
+ *
+ * Architecture (March 2026 — optimised for 8 GB VRAM):
+ *
+ *   By default, a SINGLE model (qwen3:8b Q4_K_M) serves both worker and judge
+ *   roles with different system prompts. This eliminates the 5–15 second model-swap
+ *   overhead per cycle that a dual-model setup would incur on Ollama, since only one
+ *   model can occupy the GPU at a time.
+ *
+ *   The worker uses Qwen3's thinking mode (chain-of-thought) for complex analysis
+ *   and non-thinking mode for fast tool dispatches. The judge always runs in
+ *   non-thinking mode for speed — its task (validating evidence pointers) doesn't
+ *   need deep reasoning.
+ *
+ *   Optional upgrades (configured in config.json):
+ *   - heavy_model: e.g. qwen3:14b for complex reasoning (8–12 tok/s with CPU split)
+ *   - specialist_model: e.g. Foundation-Sec-8B for threat intelligence tasks
+ *   These are swapped in on-demand, accepting the ~10s load penalty.
+ */
 final class AgentLoop
 {
 	private OllamaClient $client;
@@ -119,6 +139,30 @@ PROMPT;
 		}
 	}
 
+	// ── Model selection ──────────────────────────────────────────
+
+	/**
+	 * Select the appropriate model for a given role.
+	 *
+	 * In single-model mode (default), both worker and judge use the same model
+	 * (qwen3:8b) — no VRAM swap needed, zero overhead.
+	 *
+	 * When heavy_model is configured, it can be requested for complex reasoning
+	 * tasks at the cost of a ~10s model-load penalty and reduced throughput.
+	 */
+	private function getWorkerModel(bool $complexTask = false): string
+	{
+		if ($complexTask && $this->config->hasHeavyModel()) {
+			return $this->config->ollamaHeavyModel;
+		}
+		return $this->config->ollamaWorkerModel;
+	}
+
+	private function getJudgeModel(): string
+	{
+		return $this->config->ollamaJudgeModel;
+	}
+
 	// ── Worker cycle ─────────────────────────────────────────────
 
 	public function runWorkerCycle(string $userInstruction = ''): array
@@ -144,9 +188,10 @@ PROMPT;
 
 		while ($toolCallsMade < $this->maxToolCallsPerCycle) {
 			$response = $this->client->chat(
-				model:    $this->config->ollamaWorkerModel,
+				model:    $this->getWorkerModel(),
 				messages: $this->conversationHistory,
 				tools:    $tools,
+				thinking: $this->config->ollamaWorkerThinking,
 			);
 
 			$message = $response['message'] ?? [];
@@ -176,6 +221,13 @@ PROMPT;
 
 	// ── Judge ────────────────────────────────────────────────────
 
+	/**
+	 * Run the judge evaluation.
+	 *
+	 * In single-model mode, this reuses the same model already loaded in VRAM —
+	 * zero swap overhead. The judge system prompt is the only difference.
+	 * Non-thinking mode is used for speed since evaluation is simpler than analysis.
+	 */
 	public function runJudge(string $workerOutput): array
 	{
 		$state  = $this->case->getState();
@@ -193,9 +245,10 @@ PROMPT;
 		];
 
 		$response = $this->client->chat(
-			model:       $this->config->ollamaJudgeModel,
+			model:       $this->getJudgeModel(),
 			messages:    $judgeMessages,
 			temperature: 0.05,
+			thinking:    $this->config->ollamaJudgeThinking,
 		);
 
 		$content = $response['message']['content'] ?? '';

@@ -29,10 +29,18 @@ final class Config
 
 	// Ollama
 	public string $ollamaBaseUrl = 'http://localhost:11434';
-	public string $ollamaWorkerModel = 'qwen2.5:14b';
-	public string $ollamaJudgeModel = 'qwen2.5:32b';
+	public string $ollamaWorkerModel = 'qwen3:8b';
+	public string $ollamaJudgeModel = 'qwen3:8b';
 	public float  $ollamaTemperature = 0.1;
 	public int    $ollamaTimeout = 120;
+
+	// Ollama advanced — tuning for 8 GB VRAM envelope
+	public string $ollamaKvCacheType = 'q8_0';      // Halves KV cache VRAM — critical for 8 GB card
+	public int    $ollamaContextLength = 8192;        // Safe default; 16384 feasible with q8_0 KV cache
+	public bool   $ollamaWorkerThinking = true;       // Qwen3 hybrid thinking mode for complex analysis
+	public bool   $ollamaJudgeThinking = false;       // Judge doesn't need chain-of-thought overhead
+	public string $ollamaHeavyModel = '';             // Optional: e.g. 'qwen3:14b' for complex reasoning tasks
+	public string $ollamaSpecialistModel = '';        // Optional: e.g. 'hf.co/cisco/Foundation-Sec-8B-Instruct-GGUF' for CTI
 
 	// Paths
 	public string $casesRoot = 'cases';
@@ -73,6 +81,12 @@ final class Config
 			'ollama.judge_model'    => 'ollamaJudgeModel',
 			'ollama.temperature'    => 'ollamaTemperature',
 			'ollama.timeout'        => 'ollamaTimeout',
+			'ollama.kv_cache_type'  => 'ollamaKvCacheType',
+			'ollama.context_length' => 'ollamaContextLength',
+			'ollama.worker_thinking'    => 'ollamaWorkerThinking',
+			'ollama.judge_thinking'     => 'ollamaJudgeThinking',
+			'ollama.heavy_model'        => 'ollamaHeavyModel',
+			'ollama.specialist_model'   => 'ollamaSpecialistModel',
 			'cases_root'            => 'casesRoot',
 			'yara_rules_dir'        => 'yaraRulesDir',
 			'max_tool_timeout'      => 'maxToolTimeout',
@@ -102,6 +116,24 @@ final class Config
 		return $cfg;
 	}
 
+	/** Whether the worker and judge share the same model (single-model dual-prompt mode). */
+	public function isSingleModelMode(): bool
+	{
+		return $this->ollamaWorkerModel === $this->ollamaJudgeModel;
+	}
+
+	/** Whether a heavier model is configured for complex reasoning tasks. */
+	public function hasHeavyModel(): bool
+	{
+		return $this->ollamaHeavyModel !== '' && $this->ollamaHeavyModel !== $this->ollamaWorkerModel;
+	}
+
+	/** Whether a security-specialist model is configured. */
+	public function hasSpecialistModel(): bool
+	{
+		return $this->ollamaSpecialistModel !== '';
+	}
+
 	public static function generateDefault(string $path = 'config.json'): void
 	{
 		$default = [
@@ -122,14 +154,20 @@ final class Config
 				'shared_vm_path'   => '',
 			],
 			'ollama' => [
-				'base_url'      => 'http://localhost:11434',
-				'worker_model'  => 'qwen2.5:14b',
-				'judge_model'   => 'qwen2.5:32b',
-				'temperature'   => 0.1,
-				'timeout'       => 120,
+				'base_url'         => 'http://localhost:11434',
+				'worker_model'     => 'qwen3:8b',
+				'judge_model'      => 'qwen3:8b',
+				'temperature'      => 0.1,
+				'timeout'          => 120,
+				'kv_cache_type'    => 'q8_0',
+				'context_length'   => 8192,
+				'worker_thinking'  => true,
+				'judge_thinking'   => false,
+				'heavy_model'      => '',
+				'specialist_model' => '',
 			],
-			'cases_root'      => 'cases',
-			'yara_rules_dir'  => 'yara-rules',
+			'cases_root'       => 'cases',
+			'yara_rules_dir'   => 'yara-rules',
 			'max_tool_timeout' => 600,
 			'allow_network'    => false,
 		];

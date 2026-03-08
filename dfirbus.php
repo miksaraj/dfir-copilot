@@ -57,7 +57,7 @@ function getConfigPath(array $argv): string
 function usage(): never
 {
 	out(<<<'USAGE'
-DFIR Copilot — Locked Shields Forensics Assistant
+DFIR Copilot — Forensics CTF Assistant
 
 Usage: php dfirbus.php <command> [options]
 

@@ -1,4 +1,4 @@
-# DFIR Copilot — Forensics Assistant
+# DFIR Copilot — Forensics CTF Assistant
 
 A locally-run, evidence-led DFIR analysis orchestrator written in PHP 8.3+. The LLM never "does analysis" itself — it orchestrates deterministic tool runs, stores provenance, and produces hypotheses with explicit evidence pointers.
 

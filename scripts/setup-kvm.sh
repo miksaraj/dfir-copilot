@@ -5,18 +5,22 @@ set -euo pipefail
 # DFIR Copilot — KVM/libvirt Setup for TuxedoOS
 # ──────────────────────────────────────────────────────────────────
 #
-# Creates a host-only network for REMnux and FLARE-VM.
-# Idempotent — safe to re-run.
+# Sets up the full VM infrastructure:
+#   1. Installs qemu-kvm, libvirt, virt-manager, qemu-utils
+#   2. Creates a host-only "dfir-isolated" network
+#   3. Converts the REMnux OVA (gzip-compressed VMDK) to QCOW2
+#   4. Registers REMnux via virt-install --import
+#   5. Creates a blank QCOW2 + boots FLARE-VM from Windows ISO
+#
+# Idempotent — safe to re-run. Each step checks for prior completion.
+#
+# Prerequisites:
+#   /var/lib/libvirt/images/remnux-noble-amd64.ova   (REMnux OVA)
+#   /var/lib/libvirt/images/Win10_22H2_ENInt_x64v1.iso  (Windows ISO)
 #
 # Usage:
 #   chmod +x scripts/setup-kvm.sh
 #   sudo ./scripts/setup-kvm.sh
-#
-# After running:
-#   - Import your REMnux and FLARE-VM OVA/QCOW2 images via virt-manager
-#   - Attach both VMs to the "dfir-isolated" network
-#   - REMnux will get 192.168.56.10 via DHCP reservation (or set static)
-#   - FLARE-VM will get 192.168.56.11 via DHCP reservation (or set static)
 # ──────────────────────────────────────────────────────────────────
 
 NETWORK_NAME="dfir-isolated"
@@ -48,7 +52,7 @@ echo ""
 
 # ── Install packages if missing ───────────────────────────────────
 
-PACKAGES=(qemu-kvm libvirt-daemon-system libvirt-clients virt-manager bridge-utils)
+PACKAGES=(qemu-kvm qemu-utils libvirt-daemon-system libvirt-clients virt-manager bridge-utils)
 MISSING=()
 
 for pkg in "${PACKAGES[@]}"; do
@@ -95,12 +99,13 @@ if virsh net-info "$NETWORK_NAME" &>/dev/null; then
     ok "Network '${NETWORK_NAME}' already exists"
 
     # Make sure it's active and autostarted
-    if ! virsh net-info "$NETWORK_NAME" 2>/dev/null | grep -q "Active:.*yes"; then
+    # Use virsh net-list (not net-info text parsing) — immune to locale-mangled output
+    if ! virsh net-list --name 2>/dev/null | grep -qx "$NETWORK_NAME"; then
         virsh net-start "$NETWORK_NAME"
         ok "Network started"
     fi
 
-    if ! virsh net-info "$NETWORK_NAME" 2>/dev/null | grep -q "Autostart:.*yes"; then
+    if ! virsh net-list --autostart --name 2>/dev/null | grep -qx "$NETWORK_NAME"; then
         virsh net-autostart "$NETWORK_NAME"
         ok "Network set to autostart"
     fi
@@ -157,27 +162,101 @@ echo "     FLARE-VM: 192.168.56.11"
 echo "  5. Run: php dfirbus.php test-connections"
 echo ""
 
-# ── Optional: import helpers ──────────────────────────────────────
-# Uncomment and adjust paths if you have OVA/QCOW2 files ready:
-#
-# echo "Importing REMnux..."
-# virt-install \
-#   --name remnux \
-#   --memory 4096 \
-#   --vcpus 2 \
-#   --disk path=/var/lib/libvirt/images/remnux.qcow2 \
-#   --import \
-#   --os-variant ubuntu22.04 \
-#   --network network=${NETWORK_NAME} \
-#   --noautoconsole
-#
-# echo "Importing FLARE-VM..."
-# virt-install \
-#   --name flare-vm \
-#   --memory 4096 \
-#   --vcpus 2 \
-#   --disk path=/var/lib/libvirt/images/flare-vm.qcow2 \
-#   --import \
-#   --os-variant win10 \
-#   --network network=${NETWORK_NAME} \
-#   --noautoconsole
+# ── REMnux: OVA → QCOW2 conversion + import ──────────────────────
+# virt-install --import cannot drive an OVA directly. We extract the
+# VMDK from the archive and convert it to QCOW2 first.
+
+REMNUX_OVA="/var/lib/libvirt/images/remnux-noble-amd64.ova"
+REMNUX_QCOW2="/var/lib/libvirt/images/remnux.qcow2"
+REMNUX_NAME="remnux"
+
+if [[ -f "$REMNUX_QCOW2" ]]; then
+    ok "REMnux QCOW2 already exists — skipping conversion"
+elif [[ -f "$REMNUX_OVA" ]]; then
+    # /tmp is tmpfs (RAM-backed) — not large enough for a ~40 GB VMDK.
+    # Work entirely within /var/lib/libvirt/images/ (real disk, ~350 GB free).
+    WORK_DIR="/var/lib/libvirt/images/.remnux-extract"
+    mkdir -p "$WORK_DIR"
+
+    echo "Extracting OVA archive into $WORK_DIR..."
+    tar xf "$REMNUX_OVA" -C "$WORK_DIR"
+
+    # REMnux OVAs ship with a gzip-compressed VMDK (.vmdk.gz) — handle both
+    VMDK_GZ=$(find "$WORK_DIR" -name "*.vmdk.gz" | head -1)
+    VMDK=$(find "$WORK_DIR" -name "*.vmdk" ! -name "*.vmdk.gz" | head -1)
+
+    if [[ -n "$VMDK_GZ" ]]; then
+        # VMDK format requires seekable access — pipe via stdin won't work.
+        # gunzip in-place is fine here because WORK_DIR is on the real disk
+        # (/var/lib/libvirt/images/), not on the /tmp tmpfs.
+        echo "Decompressing $(basename "$VMDK_GZ") (this will take a few minutes)..."
+        gunzip "$VMDK_GZ"
+        VMDK="${VMDK_GZ%.gz}"
+        echo "Converting $(basename "$VMDK") → remnux.qcow2 (this will take several minutes)..."
+        qemu-img convert -f vmdk -O qcow2 -p "$VMDK" "$REMNUX_QCOW2"
+    elif [[ -n "$VMDK" ]]; then
+        echo "Converting $(basename "$VMDK") → remnux.qcow2 (this will take several minutes)..."
+        qemu-img convert -f vmdk -O qcow2 -p "$VMDK" "$REMNUX_QCOW2"
+    else
+        fail "No .vmdk or .vmdk.gz found inside $REMNUX_OVA"
+        rm -rf "$WORK_DIR"
+        exit 1
+    fi
+
+    rm -rf "$WORK_DIR"
+    ok "REMnux disk converted to QCOW2"
+else
+    warn "REMnux OVA not found at $REMNUX_OVA — skipping REMnux setup"
+fi
+
+if virsh dominfo "$REMNUX_NAME" &>/dev/null; then
+    ok "VM '$REMNUX_NAME' already registered — skipping import"
+elif [[ -f "$REMNUX_QCOW2" ]]; then
+    echo "Importing REMnux into libvirt..."
+    virt-install \
+      --name "$REMNUX_NAME" \
+      --memory 4096 \
+      --vcpus 2 \
+      --disk path="$REMNUX_QCOW2",format=qcow2 \
+      --import \
+      --os-variant ubuntu24.04 \
+      --network network=${NETWORK_NAME} \
+      --noautoconsole
+    ok "REMnux imported — start it with: virsh start $REMNUX_NAME"
+fi
+
+# ── FLARE-VM: Windows installer ISO + blank disk ──────────────────
+# This is an install ISO, not an importable image. virt-install boots
+# from the ISO and writes to a blank QCOW2. Complete setup in
+# virt-manager (VNC) or: virt-viewer --connect qemu:///system flare-vm
+
+FLARE_ISO="/var/lib/libvirt/images/Win10_22H2_ENInt_x64v1.iso"
+FLARE_QCOW2="/var/lib/libvirt/images/flare-vm.qcow2"
+FLARE_NAME="flare-vm"
+
+if virsh dominfo "$FLARE_NAME" &>/dev/null; then
+    ok "VM '$FLARE_NAME' already registered — skipping"
+elif [[ -f "$FLARE_ISO" ]]; then
+    echo "Creating FLARE-VM with Windows installer..."
+    # Create the target disk if it doesn't exist yet
+    if [[ ! -f "$FLARE_QCOW2" ]]; then
+        qemu-img create -f qcow2 "$FLARE_QCOW2" 100G
+        ok "Created blank 100 GB disk for FLARE-VM"
+    fi
+    virt-install \
+      --name "$FLARE_NAME" \
+      --memory 8192 \
+      --vcpus 4 \
+      --disk path="$FLARE_QCOW2",format=qcow2 \
+      --cdrom "$FLARE_ISO" \
+      --os-variant win10 \
+      --network network=${NETWORK_NAME} \
+      --graphics vnc,listen=127.0.0.1,port=5910 \
+      --video vga \
+      --noautoconsole
+    ok "FLARE-VM registered — complete Windows setup via:"
+    ok "  virt-manager   (GUI, recommended)"
+    ok "  virt-viewer --connect qemu:///system $FLARE_NAME"
+else
+    warn "FLARE-VM ISO not found at $FLARE_ISO — skipping FLARE-VM setup"
+fi

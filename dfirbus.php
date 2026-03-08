@@ -161,7 +161,8 @@ function cmdRun(Config $cfg, string $caseId, string $adapterName, array $rawArgs
 		}
 	}
 
-	out("Running {$adapterName} on {$adapter::TARGET}...");
+	$target = $adapter::TARGET;
+	out("Running {$adapterName} on {$target}...");
 	$result = $adapter->run($case, $cfg, $params);
 
 	out("\nSuccess: " . ($result->success ? 'yes' : 'no'));

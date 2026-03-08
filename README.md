@@ -94,6 +94,17 @@ export OLLAMA_NUM_PARALLEL=1             # Single request mode saves VRAM
 export OLLAMA_MAX_LOADED_MODELS=1        # Keep only one model loaded at a time
 ```
 
+### VM Images
+
+Before running the setup script, download and place these files in `/var/lib/libvirt/images/`:
+
+| Image | Filename | Source |
+|-------|----------|--------|
+| REMnux OVA | `remnux-noble-amd64.ova` | [remnux.org](https://remnux.org/#702) |
+| Windows 10 ISO | `Win10_22H2_ENInt_x64v1.iso` | [microsoft.com](https://www.microsoft.com/software-download/windows10ISO) |
+
+The setup script expects these exact paths. REMnux Noble ships as a VMware OVA with a gzip-compressed VMDK inside — the script handles the OVA→QCOW2 conversion automatically.
+
 ## Setup Scripts
 
 The `scripts/` directory contains two helper scripts that handle environment setup and verification. Run them in order: KVM setup first (once, well before the exercise), preflight check on exercise day.
@@ -107,13 +118,22 @@ sudo ./scripts/setup-kvm.sh
 ```
 
 What it does:
-- Installs `qemu-kvm`, `libvirt-daemon-system`, `virt-manager`, and related packages if missing
-- Starts and enables `libvirtd`
-- Adds your user to the `libvirt` and `kvm` groups (requires logout/login to take effect)
-- Creates a `dfir-isolated` host-only network (bridge `virbr-dfir`, host IP `192.168.56.1`, DHCP range `.10`–`.50`)
-- Verifies KVM hardware acceleration is available
+1. Installs `qemu-kvm`, `qemu-utils`, `libvirt-daemon-system`, `virt-manager`, and related packages if missing
+2. Starts and enables `libvirtd`
+3. Adds your user to the `libvirt` and `kvm` groups (**requires logout/login to take effect**)
+4. Creates a `dfir-isolated` host-only network (bridge `virbr-dfir`, host IP `192.168.56.1`, DHCP `.10`–`.50`)
+5. Verifies KVM hardware acceleration is available
+6. **REMnux:** extracts the VMDK from the OVA, decompresses it (the Noble OVA ships with a `.vmdk.gz`), converts to QCOW2 via `qemu-img`, and registers the VM via `virt-install --import`
+7. **FLARE-VM:** creates a blank 100 GB QCOW2 target disk and registers a VM that boots from the Windows ISO via VNC
 
-After running, import your REMnux and FLARE-VM images via `virt-manager` and attach them to the `dfir-isolated` network. The bottom of the script has commented-out `virt-install` examples you can adapt for headless import.
+After running, **log out and back in** (for group membership to take effect), then set the libvirt connection URI permanently:
+
+```bash
+# Add to your ~/.bashrc or ~/.zshrc
+export LIBVIRT_DEFAULT_URI="qemu:///system"
+```
+
+Without this, `virsh` defaults to `qemu:///session` (a separate, empty user-space instance) and you won't see your VMs.
 
 **When to run:** Any time before the exercise — ideally the day you set up your Host Linux. Only needs to run once.
 
@@ -147,52 +167,55 @@ The full workflow from fresh install to running analysis:
 ```bash
 # ── One-time setup (days/weeks before exercise) ──────────────
 
-# 1. Set up KVM (Host Linux only, run once)
+# 1. Place VM images in /var/lib/libvirt/images/ (see Prerequisites > VM Images)
+
+# 2. Set up KVM, convert OVA, register VMs (run once)
 sudo ./scripts/setup-kvm.sh
+# Log out and back in, then: export LIBVIRT_DEFAULT_URI="qemu:///system"
 
-# 2. Import VMs via virt-manager, attach to dfir-isolated network
+# 3. Configure REMnux post-boot (see VM Setup > REMnux below)
 
-# 3. Generate config and edit it
+# 4. Generate config and edit it
 php dfirbus.php init-config
 # Edit config.json — set VM IPs, SSH key paths, model names
 
-# 4. Pull models
+# 5. Pull models
 ollama pull qwen3:8b
 ollama pull nomic-embed-text
 
 # ── Exercise day ─────────────────────────────────────────────
 
-# 5. Boot VMs, start Ollama, then run preflight
+# 6. Boot VMs, start Ollama, then run preflight
 ollama serve &
 php scripts/preflight.php
 
-# 6. Index scenario CTI into the knowledge base
+# 7. Index scenario CTI into the knowledge base
 #    (Place .md/.txt files in knowledge/actors/, knowledge/scenario/, knowledge/notes/)
 php dfirbus.php kb-index
 
-# 7. Create a case and ingest evidence
+# 8. Create a case and ingest evidence
 php dfirbus.php new-case challenge-01
 php dfirbus.php ingest challenge-01 /path/to/challenge/bundle/
 
 # ── Analysis ─────────────────────────────────────────────────
 
-# 8. Run local triage (file IDs, entropy — no VMs needed)
+# 9. Run local triage (file IDs, entropy — no VMs needed)
 php dfirbus.php triage challenge-01
 
-# 9. Run specific adapters
+# 10. Run specific adapters
 php dfirbus.php run challenge-01 file_id file_path=raw/suspicious.exe
 php dfirbus.php run challenge-01 strings_and_iocs file_path=raw/suspicious.exe
 php dfirbus.php run challenge-01 yara_scan file_path=raw/suspicious.exe
 php dfirbus.php run challenge-01 extract_iocs input_file=derived/suspicious_strings.txt
 php dfirbus.php run challenge-01 attack_map 'observations=["powershell execution","scheduled task persistence","dns tunneling"]'
 
-# 10. Run the agent (single worker + judge cycle)
+# 11. Run the agent (single worker + judge cycle)
 php dfirbus.php agent challenge-01 "Triage the malware sample and identify C2 infrastructure"
 
-# 11. Auto-pilot mode (repeats until judge approves)
+# 12. Auto-pilot mode (repeats until judge approves)
 php dfirbus.php agent-auto challenge-01 "Full analysis and attribution" --max-cycles=10
 
-# 12. Generate blue-team report
+# 13. Generate blue-team report
 php dfirbus.php report challenge-01
 ```
 
@@ -345,17 +368,139 @@ dfir-copilot/
 
 ## VM Setup
 
-### REMnux (SSH via php-ssh2)
-```bash
-# On REMnux:
-sudo systemctl enable ssh && sudo systemctl start ssh
-mkdir -p /tmp/dfirbus
+The setup script (`scripts/setup-kvm.sh`) handles VM registration, but each VM requires post-boot configuration. Do this **once**, well before the exercise.
 
-# On your host — generate and install SSH key:
+### REMnux Post-Boot Configuration
+
+The REMnux OVA is a vanilla Ubuntu 24.04 base — `remnux install` is what transforms it into the full DFIR toolkit. The OVA was built for VMware, so KVM NIC names won't match and networking needs manual configuration.
+
+#### 1. Start the VM and open its console
+
+```bash
+virsh start remnux
+virt-manager   # double-click 'remnux' to open the console
+```
+
+Default credentials: `remnux` / `malware`
+
+#### 2. Configure networking for KVM
+
+The OVA ships with VMware NIC names (`ens32` etc.) which don't exist under KVM. Create a netplan config for the actual interface names:
+
+```bash
+# Inside REMnux console — find your NIC names
+ip link show
+# You'll see something like enp1s0, enp7s0 (not ens32)
+```
+
+Match MAC addresses to networks: on the **host**, run `virsh domiflist remnux` to see which MAC is on `dfir-isolated`. Inside **REMnux**, `ip link show` lists each NIC's MAC.
+
+Create the netplan config (both NICs on DHCP initially — we'll set static later):
+
+```bash
+sudo tee /etc/netplan/01-kvm-network.yaml << 'EOF'
+network:
+  version: 2
+  renderer: networkd
+  ethernets:
+    enp1s0:       # adjust to your dfir-isolated NIC name
+      dhcp4: true
+EOF
+
+sudo chmod 600 /etc/netplan/01-kvm-network.yaml
+sudo systemctl enable systemd-networkd --now
+sudo netplan apply
+```
+
+> **Note:** If NetworkManager shows devices as "strictly unmanaged", that's expected — use `renderer: networkd` in netplan to bypass it.
+
+#### 3. Add temporary internet access for `remnux install`
+
+The `dfir-isolated` network is host-only (no NAT, no internet). You need a temporary second NIC on the `default` libvirt network to download packages.
+
+On the **host**:
+
+```bash
+# Ensure the default NAT network is running
+virsh net-start default 2>/dev/null || true
+
+# Attach a temporary internet NIC
+virsh attach-interface remnux network default --model virtio --config --live
+```
+
+Inside **REMnux**, add the new NIC to netplan temporarily:
+
+```bash
+# Find the new NIC name (ip link show — the one that just appeared)
+sudo tee /etc/netplan/01-kvm-network.yaml << 'EOF'
+network:
+  version: 2
+  renderer: networkd
+  ethernets:
+    enp1s0:       # dfir-isolated NIC
+      dhcp4: true
+    enp7s0:       # temporary internet NIC — adjust name
+      dhcp4: true
+EOF
+
+sudo netplan apply
+curl -I https://remnux.org   # verify internet access
+```
+
+#### 4. Run `remnux install`
+
+```bash
+sudo remnux install
+```
+
+> ⏳ This takes **20–60 minutes** — it installs Volatility, YARA, Capa, Plaso, tshark, and hundreds of other tools.
+
+#### 5. Configure SSH
+
+```bash
+# Inside REMnux:
+sudo apt install -y openssh-server   # if not already installed by remnux install
+echo "UseDNS no" | sudo tee -a /etc/ssh/sshd_config   # prevent DNS lookup timeout on isolated network
+sudo systemctl enable ssh --now
+mkdir -p /tmp/dfirbus
+```
+
+#### 6. Set static IP and remove internet NIC
+
+Update netplan to a static IP and remove the temporary internet NIC entry:
+
+```bash
+sudo tee /etc/netplan/01-kvm-network.yaml << 'EOF'
+network:
+  version: 2
+  renderer: networkd
+  ethernets:
+    enp1s0:       # dfir-isolated NIC — adjust name
+      addresses: [192.168.56.10/24]
+EOF
+
+sudo netplan apply
+```
+
+On the **host**, detach the temporary internet NIC:
+
+```bash
+virsh domiflist remnux   # note the MAC of the 'default' NIC
+virsh detach-interface remnux network --mac <MAC-of-default-NIC> --config --live
+```
+
+#### 7. Set up SSH keys (on the host)
+
+```bash
+mkdir -p ~/.ssh && chmod 700 ~/.ssh
+mkdir -p keys
 ssh-keygen -t ed25519 -f keys/remnux_ed25519 -N ""
 ssh-copy-id -i keys/remnux_ed25519.pub remnux@192.168.56.10
 
-# Verify from host:
+# Verify passwordless login:
+ssh -i keys/remnux_ed25519 remnux@192.168.56.10 echo ok
+
+# Verify via php-ssh2:
 php -r "
   \$c = ssh2_connect('192.168.56.10', 22);
   ssh2_auth_pubkey_file(\$c, 'remnux', 'keys/remnux_ed25519.pub', 'keys/remnux_ed25519');
@@ -365,9 +510,25 @@ php -r "
 "
 ```
 
-### FLARE-VM (WinRM via curl)
+### FLARE-VM Post-Boot Configuration
+
+The setup script boots the VM from the Windows ISO. Complete the setup in order:
+
+#### 1. Install Windows 10
+
+Open `virt-manager`, connect to the `flare-vm` display, and click through the Windows 10 setup wizard.
+
+#### 2. Install FLARE-VM toolkit
+
+Follow the official installation guide at [github.com/mandiant/flare-vm](https://github.com/mandiant/flare-vm). This installs PE analysis tools, .NET decompilers, debuggers, and other DFIR utilities.
+
+> ⏳ This takes **30–60+ minutes** depending on which packages you select.
+
+#### 3. Configure WinRM for DFIR Copilot
+
+After FLARE-VM installation is complete, open PowerShell **as Administrator**:
+
 ```powershell
-# On FLARE-VM (run as Administrator):
 Enable-PSRemoting -Force
 Set-Item WSMan:\localhost\Service\Auth\Basic -Value $true
 Set-Item WSMan:\localhost\Service\AllowUnencrypted -Value $true
@@ -375,13 +536,7 @@ mkdir C:\dfirbus
 # Restrict WinRM to host-only network adapter only
 ```
 
-### KVM/libvirt Setup (Host Linux)
-
-Handled by the setup script — see [Setup Scripts](#setup-scripts) above.
-
-```bash
-sudo ./scripts/setup-kvm.sh
-```
+Set a static IP of `192.168.56.11` on the network adapter connected to `dfir-isolated`.
 
 ## Configuration (config.json)
 

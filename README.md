@@ -518,25 +518,128 @@ The setup script boots the VM from the Windows ISO. Complete the setup in order:
 
 Open `virt-manager`, connect to the `flare-vm` display, and click through the Windows 10 setup wizard.
 
-#### 2. Install FLARE-VM toolkit
+#### 2. Add temporary internet access for FLARE-VM installation
+
+The `dfir-isolated` network is host-only (no NAT, no internet). The FLARE-VM installer needs internet to download packages, so attach a temporary second NIC on the `default` libvirt network.
+
+On the **host**:
+
+```bash
+# Ensure the default NAT network is running
+virsh net-start default 2>/dev/null || true
+
+# Attach a temporary internet NIC — use e1000e, NOT virtio
+# (Windows has inbox e1000e drivers; virtio requires a separate driver package)
+sudo virsh attach-interface flare-vm \
+  --type network \
+  --source default \
+  --model e1000e \
+  --config --live
+```
+
+Inside **Windows**, the new adapter should appear in Network Connections (`ncpa.cpl`) and automatically receive a DHCP address in the `192.168.122.0/24` range. Verify with:
+
+```cmd
+ping 8.8.8.8
+```
+
+> If the adapter doesn't appear, open **Device Manager → Action → Scan for hardware changes**.
+
+#### 3. Install FLARE-VM toolkit
 
 Follow the official installation guide at [github.com/mandiant/flare-vm](https://github.com/mandiant/flare-vm). This installs PE analysis tools, .NET decompilers, debuggers, and other DFIR utilities.
 
 > ⏳ This takes **30–60+ minutes** depending on which packages you select.
 
-#### 3. Configure WinRM for DFIR Copilot
+Once installation is complete, **remove the internet NIC** on the host:
+
+```bash
+sudo virsh domiflist flare-vm   # find the MAC of the 'default' NIC
+sudo virsh detach-interface flare-vm \
+  --type network \
+  --mac <MAC-of-default-NIC> \
+  --config --live
+```
+
+#### 4. Configure WinRM for DFIR Copilot
 
 After FLARE-VM installation is complete, open PowerShell **as Administrator**:
 
 ```powershell
-Enable-PSRemoting -Force
+# Bootstrap WinRM service, listener, and firewall rule
+winrm quickconfig -Force
+
+# Enable remoting — -SkipNetworkProfileCheck is required because the dfir-isolated NIC
+# has no gateway, so Windows classifies it as "Public" and blocks remoting by default
+Enable-PSRemoting -Force -SkipNetworkProfileCheck
+
+# Enable Basic auth and unencrypted HTTP (required by the PHP WinRM executor)
 Set-Item WSMan:\localhost\Service\Auth\Basic -Value $true
 Set-Item WSMan:\localhost\Service\AllowUnencrypted -Value $true
+
+# Create the work directory
 mkdir C:\dfirbus
-# Restrict WinRM to host-only network adapter only
 ```
 
-Set a static IP of `192.168.56.11` on the network adapter connected to `dfir-isolated`.
+Set a static IP of `192.168.56.11` on the network adapter connected to `dfir-isolated`
+(Control Panel → Network Connections → right-click adapter → Properties → TCP/IPv4):
+- IP address: `192.168.56.11`
+- Subnet mask: `255.255.255.0`
+- Default gateway: *(leave blank)*
+- DNS: *(leave blank)*
+
+> **Note:** If ping from the host fails, allow ICMP in Windows Firewall:
+> ```powershell
+> netsh advfirewall firewall add rule name="Allow ICMPv4" protocol=icmpv4:8,any dir=in action=allow
+> ```
+
+#### 5. Configure the shared folder (optional)
+
+The shared folder lets the agent transfer PE samples to FLARE-VM automatically. Skip this if you plan to copy files manually.
+
+On the **host**, install Samba and create a share:
+
+```bash
+sudo apt install -y samba
+mkdir -p ~/shared-flare
+
+# Add to the end of /etc/samba/smb.conf:
+sudo tee -a /etc/samba/smb.conf << 'EOF'
+
+[dfirbus]
+   path = /home/<your-username>/shared-flare
+   browseable = yes
+   read only = no
+   guest ok = yes
+   force user = <your-username>
+EOF
+
+sudo systemctl restart smbd nmbd
+
+# Allow SMB only from the isolated subnet
+sudo ufw allow from 192.168.56.0/24 to any port 445
+sudo ufw allow from 192.168.56.0/24 to any port 139
+```
+
+Verify the share is visible (host IP on the isolated bridge is `192.168.56.1`):
+
+```bash
+smbclient -L //192.168.56.1 -N   # should list 'dfirbus'
+```
+
+Inside **Windows**, map it as a persistent `Z:` drive:
+
+```powershell
+net use Z: \\192.168.56.1\dfirbus /persistent:yes
+dir Z:\   # verify
+```
+
+Then update `config.json`:
+
+```json
+"shared_host_path": "/home/<your-username>/shared-flare",
+"shared_vm_path": "Z:\\"
+```
 
 ## Configuration (config.json)
 

@@ -105,6 +105,7 @@ final class WinRMExecutor
                       xmlns:p="http://schemas.microsoft.com/wbem/wsman/1/wsman.xsd">
           <env:Header>
             <a:To>%ENDPOINT%</a:To>
+            <a:MessageID>uuid:%MSGID%</a:MessageID>
             <w:ResourceURI mustUnderstand="true">http://schemas.microsoft.com/wbem/wsman/1/windows/shell/cmd</w:ResourceURI>
             <a:ReplyTo><a:Address mustUnderstand="true">http://schemas.xmlsoap.org/ws/2004/08/addressing/role/anonymous</a:Address></a:ReplyTo>
             <a:Action mustUnderstand="true">http://schemas.xmlsoap.org/ws/2004/09/transfer/Create</a:Action>
@@ -125,6 +126,7 @@ final class WinRMExecutor
         XML;
 
 		$body = str_replace('%ENDPOINT%', htmlspecialchars($this->endpoint), $body);
+		$body = str_replace('%MSGID%', $this->uuid(), $body);
 		$response = $this->soapRequest($body);
 
 		if ($response === null) return null;
@@ -147,6 +149,7 @@ final class WinRMExecutor
                       xmlns:w="http://schemas.dmtf.org/wbem/wsman/1/wsman.xsd">
           <env:Header>
             <a:To>{$this->endpoint}</a:To>
+            <a:MessageID>uuid:{$this->uuid()}</a:MessageID>
             <w:ResourceURI mustUnderstand="true">http://schemas.microsoft.com/wbem/wsman/1/windows/shell/cmd</w:ResourceURI>
             <a:ReplyTo><a:Address mustUnderstand="true">http://schemas.xmlsoap.org/ws/2004/08/addressing/role/anonymous</a:Address></a:ReplyTo>
             <a:Action mustUnderstand="true">http://schemas.microsoft.com/wbem/wsman/1/windows/shell/Command</a:Action>
@@ -189,6 +192,7 @@ final class WinRMExecutor
                           xmlns:w="http://schemas.dmtf.org/wbem/wsman/1/wsman.xsd">
               <env:Header>
                 <a:To>{$this->endpoint}</a:To>
+                <a:MessageID>uuid:{$this->uuid()}</a:MessageID>
                 <w:ResourceURI mustUnderstand="true">http://schemas.microsoft.com/wbem/wsman/1/windows/shell/cmd</w:ResourceURI>
                 <a:ReplyTo><a:Address mustUnderstand="true">http://schemas.xmlsoap.org/ws/2004/08/addressing/role/anonymous</a:Address></a:ReplyTo>
                 <a:Action mustUnderstand="true">http://schemas.microsoft.com/wbem/wsman/1/windows/shell/Receive</a:Action>
@@ -245,6 +249,7 @@ final class WinRMExecutor
                       xmlns:w="http://schemas.dmtf.org/wbem/wsman/1/wsman.xsd">
           <env:Header>
             <a:To>{$this->endpoint}</a:To>
+            <a:MessageID>uuid:{$this->uuid()}</a:MessageID>
             <w:ResourceURI mustUnderstand="true">http://schemas.microsoft.com/wbem/wsman/1/windows/shell/cmd</w:ResourceURI>
             <a:Action mustUnderstand="true">http://schemas.xmlsoap.org/ws/2004/09/transfer/Delete</a:Action>
             <w:SelectorSet>
@@ -256,6 +261,17 @@ final class WinRMExecutor
         XML;
 
 		$this->soapRequest($body);
+	}
+
+	// ── Helpers ─────────────────────────────────────────────────
+
+	private function uuid(): string
+	{
+		// RFC 4122 v4 UUID
+		$data = random_bytes(16);
+		$data[6] = chr((ord($data[6]) & 0x0f) | 0x40);
+		$data[8] = chr((ord($data[8]) & 0x3f) | 0x80);
+		return vsprintf('%s%s-%s-%s-%s-%s%s%s', str_split(bin2hex($data), 4));
 	}
 
 	// ── HTTP layer ───────────────────────────────────────────────

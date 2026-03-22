@@ -535,3 +535,181 @@ final class ActorRank extends BaseAdapter
 		);
 	}
 }
+
+// log_parse
+
+/**
+ * Generic log file parser.
+ *
+ * Handles structured (JSON lines, CSV) and unstructured (syslog, custom)
+ * log formats. Extracts timestamps, filters by keyword/regex, and produces
+ * a summary of patterns.
+ *
+ * Relevant for: #siemloganalysis, #systemlog, #cloudforensics, railway logs,
+ * ICS/SCADA logs, CI/CD pipeline logs.
+ *
+ * Runs locally (no VM needed) — log files are text.
+ */
+final class LogParse extends BaseAdapter
+{
+	public const NAME        = 'log_parse';
+	public const VERSION     = '1.0.0';
+	public const DESCRIPTION = 'Parse and search log files (syslog, JSON lines, CSV, custom formats). Filter by keyword/regex, extract timestamps, summarise patterns.';
+	public const TARGET      = 'local';
+
+	public function getToolSchema(): array
+	{
+		return [
+			'name'        => self::NAME,
+			'description' => self::DESCRIPTION,
+			'parameters'  => [
+				'type'       => 'object',
+				'properties' => [
+					'file_path' => [
+						'type'        => 'string',
+						'description' => 'Path to log file (relative to case dir)',
+					],
+					'keywords' => [
+						'type'        => 'array',
+						'items'       => ['type' => 'string'],
+						'description' => 'Filter: only return lines containing any of these keywords (case-insensitive)',
+					],
+					'regex' => [
+						'type'        => 'string',
+						'description' => 'Filter: only return lines matching this regex pattern',
+					],
+					'max_lines' => [
+						'type'        => 'integer',
+						'description' => 'Maximum lines to return (default: 200)',
+						'default'     => 200,
+					],
+					'tail' => [
+						'type'        => 'boolean',
+						'description' => 'If true, return last N lines instead of first N (default: false)',
+						'default'     => false,
+					],
+				],
+				'required' => ['file_path'],
+			],
+		];
+	}
+
+	protected function execute(Workspace $case, Config $config, array $params): AdapterResult
+	{
+		$fp       = $this->resolveFilePath($case, $this->requireParam($params, 'file_path'));
+		$keywords = $params['keywords'] ?? [];
+		$regex    = $params['regex'] ?? '';
+		$maxLines = (int) ($params['max_lines'] ?? 200);
+		$tail     = (bool) ($params['tail'] ?? false);
+
+		if (!file_exists($fp)) return $this->errorResult("File not found: {$fp}");
+
+		$allLines   = file($fp, FILE_IGNORE_NEW_LINES);
+		$totalLines = count($allLines);
+
+		// Detect format
+		$format    = 'unknown';
+		$firstLine = $allLines[0] ?? '';
+		if (json_decode($firstLine) !== null) {
+			$format = 'jsonl';
+		} elseif (str_contains($firstLine, ',') && substr_count($firstLine, ',') >= 2) {
+			$format = 'csv';
+		} elseif (preg_match('/^[A-Z][a-z]{2}\s+\d+\s+\d{2}:\d{2}:\d{2}/', $firstLine)) {
+			$format = 'syslog';
+		} elseif (preg_match('/^\d{4}-\d{2}-\d{2}/', $firstLine)) {
+			$format = 'timestamped';
+		}
+
+		// Filter lines
+		$matched       = [];
+		$keywordsLower = array_map('strtolower', $keywords);
+
+		foreach ($allLines as $idx => $line) {
+			$lineno  = $idx + 1;
+			$include = true;
+
+			if (!empty($keywordsLower)) {
+				$include = false;
+				$lower   = strtolower($line);
+				foreach ($keywordsLower as $kw) {
+					if (str_contains($lower, $kw)) {
+						$include = true;
+						break;
+					}
+				}
+			}
+
+			if ($include && $regex !== '') {
+				$include = (bool) @preg_match("/{$regex}/i", $line);
+			}
+
+			if ($include) {
+				$matched[] = ['line' => $lineno, 'text' => $line];
+			}
+		}
+
+		if ($tail) {
+			$matched = array_slice($matched, -$maxLines);
+		} else {
+			$matched = array_slice($matched, 0, $maxLines);
+		}
+
+		// Frequency analysis
+		$patterns = [];
+		foreach ($allLines as $line) {
+			if (preg_match('/\b(ERROR|WARN(?:ING)?|INFO|DEBUG|CRITICAL|FATAL|ALERT|EMERG)\b/i', $line, $m)) {
+				$level = strtoupper($m[1]);
+				$patterns['levels'][$level] = ($patterns['levels'][$level] ?? 0) + 1;
+			}
+
+			if (preg_match_all('/\b(?:\d{1,3}\.){3}\d{1,3}\b/', $line, $m)) {
+				foreach ($m[0] as $ip) {
+					$patterns['ips'][$ip] = ($patterns['ips'][$ip] ?? 0) + 1;
+				}
+			}
+		}
+
+		if (isset($patterns['levels'])) arsort($patterns['levels']);
+		if (isset($patterns['ips'])) {
+			arsort($patterns['ips']);
+			$patterns['ips'] = array_slice($patterns['ips'], 0, 20, true);
+		}
+
+		$stem    = pathinfo($fp, PATHINFO_FILENAME);
+		$outPath = "{$case->derivedDir}/{$stem}_log_parsed.json";
+		$this->writeJson($outPath, [
+			'format'   => $format,
+			'total'    => $totalLines,
+			'matched'  => count($matched),
+			'patterns' => $patterns,
+			'lines'    => $matched,
+		]);
+
+		$evidence = [];
+		foreach ($patterns['levels'] ?? [] as $level => $count) {
+			$evidence[] = "log:{$stem}:level={$level}:count={$count}";
+		}
+		foreach (array_slice($patterns['ips'] ?? [], 0, 5, true) as $ip => $count) {
+			$evidence[] = "log:{$stem}:ip={$ip}:count={$count}";
+		}
+
+		return new AdapterResult(
+			adapterName:       self::NAME,
+			success:           true,
+			producedFiles:     [$outPath],
+			structuredResults: [
+				'format'        => $format,
+				'total_lines'   => $totalLines,
+				'matched_lines' => count($matched),
+				'patterns'      => $patterns,
+				'sample_lines'  => array_slice($matched, 0, 30),
+			],
+			evidencePointers:  $evidence,
+			stdoutExcerpt:     "Log ({$format}): {$totalLines} lines, " . count($matched) . " matched" .
+				(!empty($keywords) ? ", keywords: " . implode(', ', $keywords) : '') .
+				($regex !== '' ? ", regex: {$regex}" : ''),
+			stderrExcerpt:     '',
+			execResult:        new ExecResult(0, '', '', 0, 'local', "log_parse " . basename($fp)),
+		);
+	}
+}

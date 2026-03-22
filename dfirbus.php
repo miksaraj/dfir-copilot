@@ -16,6 +16,7 @@ use DFIRCopilot\Agent\{OllamaClient, AgentLoop};
 use DFIRCopilot\Executors\SSHExecutor;
 use DFIRCopilot\Executors\WinRMExecutor;
 use DFIRCopilot\Rag\KnowledgeBase;
+use DFIRCopilot\Adapters\{InjectPdfRead, EvtxParse, LogParse};
 
 // ── Adapter registration ─────────────────────────────────────────
 
@@ -34,6 +35,9 @@ function registerAllAdapters(): void
 	AdapterRegistry::register(new PCAPSummary());
 	AdapterRegistry::register(new PEQuicklook());
 	AdapterRegistry::register(new KnowledgeSearch());
+	AdapterRegistry::register(new InjectPdfRead());
+	AdapterRegistry::register(new EvtxParse());
+	AdapterRegistry::register(new LogParse());
 }
 
 // ── CLI helpers ──────────────────────────────────────────────────

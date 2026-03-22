@@ -583,14 +583,16 @@ final class PCAPSummary extends BaseAdapter
  * Every LS challenge includes a *_inject.pdf. Feeding its text to the agent
  * lets it understand the questions without you having to type them in.
  *
- * Uses pdftotext (from poppler-utils) on REMnux.
+ * Runs pdftotext locally first (the host always has the file and
+ * poppler-utils is a standard dependency). Falls back to REMnux SSH only
+ * when pdftotext is absent on the host.
  */
 final class InjectPdfRead extends BaseAdapter
 {
 	public const NAME        = 'inject_pdf_read';
-	public const VERSION     = '1.0.0';
+	public const VERSION     = '1.1.0';
 	public const DESCRIPTION = 'Extract text from an inject PDF (challenge briefing). Returns the questions/tasks the analyst needs to answer.';
-	public const TARGET      = 'remnux';
+	public const TARGET      = 'local';
 
 	public function getToolSchema(): array
 	{
@@ -615,69 +617,137 @@ final class InjectPdfRead extends BaseAdapter
 		$fp = $this->resolveFilePath($case, $this->requireParam($params, 'file_path'));
 		if (!file_exists($fp)) return $this->errorResult("File not found: {$fp}");
 
-		$ssh       = remnux_ssh($config);
-		$remoteDir = $config->remnuxWorkDir;
-
-		$transfer = SharedPath::ensureOnREMnux($fp, $config, $ssh, $remoteDir);
-		$remoteFp = $transfer['path'];
-
-		// Extract text with pdftotext (poppler-utils, standard on REMnux)
-		$remoteOut = "{$remoteDir}/" . pathinfo($fp, PATHINFO_FILENAME) . '_text.txt';
-		$result    = $ssh->run("pdftotext -layout '{$remoteFp}' '{$remoteOut}' 2>&1", 30);
-
 		$stem     = pathinfo($fp, PATHINFO_FILENAME);
 		$localOut = "{$case->derivedDir}/{$stem}_inject_text.txt";
-		$ssh->copyFrom($remoteOut, $localOut);
 
-		if ($transfer['method'] === 'sftp') {
-			$ssh->run("rm -f '{$remoteFp}'");
+		$text   = '';
+		$method = '';
+		$stderr = '';
+
+		// ── 1. Try local pdftotext (preferred — no SSH round-trip needed) ──
+		$hasPdftotext = trim(shell_exec('which pdftotext 2>/dev/null') ?? '') !== '';
+
+		if ($hasPdftotext) {
+			// -layout preserves column alignment; fall back without it for
+			// PDFs where it produces empty output (some Word-exported files).
+			$escapedFp  = escapeshellarg($fp);
+			$escapedOut = escapeshellarg($localOut);
+
+			exec("pdftotext -layout {$escapedFp} {$escapedOut} 2>/dev/null");
+
+			if (file_exists($localOut)) {
+				$text = trim(file_get_contents($localOut));
+			}
+
+			// If -layout produced nothing, retry in stdout mode without -layout
+			if ($text === '') {
+				$raw  = shell_exec("pdftotext {$escapedFp} - 2>/dev/null") ?? '';
+				$text = trim($raw);
+				if ($text !== '') {
+					file_put_contents($localOut, $text);
+				}
+			}
+
+			$method = 'local';
 		}
-		$ssh->run("rm -f '{$remoteOut}'");
 
-		$text = file_exists($localOut) ? trim(file_get_contents($localOut)) : '';
+		// ── 2. Fallback: REMnux SSH (when pdftotext not on host) ──────────
+		if ($text === '') {
+			try {
+				$ssh       = remnux_ssh($config);
+				$remoteDir = $config->remnuxWorkDir;
+				$ssh->run("mkdir -p {$remoteDir}");
+
+				$transfer  = SharedPath::ensureOnREMnux($fp, $config, $ssh, $remoteDir);
+				$remoteFp  = $transfer['path'];
+				$remoteOut = "{$remoteDir}/{$stem}_text.txt";
+
+				// Run both attempts while the remote file is still present,
+				// then clean up — the original code deleted first, then fell
+				// back, which caused "file not found" on the second attempt.
+				$r1 = $ssh->run("pdftotext -layout '{$remoteFp}' '{$remoteOut}' 2>&1", 30);
+				$ssh->copyFrom($remoteOut, $localOut);
+				$text   = file_exists($localOut) ? trim(file_get_contents($localOut)) : '';
+				$stderr = $r1->stderr;
+
+				if ($text === '') {
+					$r2   = $ssh->run("pdftotext '{$remoteFp}' - 2>/dev/null", 30);
+					$text = trim($r2->stdout);
+					if ($text !== '') {
+						file_put_contents($localOut, $text);
+					}
+				}
+
+				// Cleanup now that both attempts are done
+				$ssh->run("rm -f '{$remoteOut}'");
+				if ($transfer['method'] === 'sftp') {
+					$ssh->run("rm -f '{$remoteFp}'");
+				}
+
+				$method = "ssh:{$config->remnuxHost}";
+			} catch (\Throwable $e) {
+				$stderr = $e->getMessage();
+			}
+		}
 
 		if ($text === '') {
-			// Fallback: try pdftotext without -layout
-			$result2 = $ssh->run("pdftotext '{$remoteFp}' - 2>/dev/null", 30);
-			$text    = trim($result2->stdout);
-			if ($text !== '') {
-				file_put_contents($localOut, $text);
-			}
+			return $this->errorResult(
+				"pdftotext produced no output. Is poppler-utils installed? " .
+				($stderr !== '' ? "Stderr: {$stderr}" : "Try: sudo apt install poppler-utils")
+			);
 		}
 
-		// Extract questions/tasks (lines with numbers, Q:, interrogatives, directives)
-		$questions = [];
-		foreach (explode("\n", $text) as $i => $line) {
-			$trimmed = trim($line);
-			if ($trimmed === '') continue;
-			if (preg_match('/^\d+[\.\)]\s/', $trimmed) ||
-				preg_match('/^Q\d*[\.:]/i', $trimmed) ||
-				str_contains($trimmed, '?') ||
-				preg_match('/^(what|who|when|where|which|how|find|identify|determine|describe|explain|list|name|provide)/i', $trimmed)) {
-				$questions[] = [
-					'line'     => $i + 1,
-					'question' => $trimmed,
-				];
+		// ── Parse into sections by ALL-CAPS heading ───────────────────────
+		// Inject PDFs use headings like DESCRIPTION, TASKING, REPORTING rather
+		// than question syntax, so we detect those and bucket lines beneath
+		// them. The agent always has full_text to read directly.
+		$sections       = [];
+		$currentSection = 'HEADER';
+		$buffer         = [];
+
+		$flushSection = function () use (&$sections, &$currentSection, &$buffer): void {
+			$body = trim(implode("\n", $buffer));
+			if ($body !== '') {
+				$sections[$currentSection] = $body;
 			}
+			$buffer = [];
+		};
+
+		foreach (explode("\n", $text) as $line) {
+			$trimmed = trim($line);
+			// A section heading: 1–4 ALL-CAPS words on their own line,
+			// no punctuation (avoids matching "EXERCISE-EXERCISE-EXERCISE").
+			if (preg_match('/^[A-Z][A-Z\s]{1,40}$/', $trimmed) &&
+				preg_match('/^[A-Z]+(?:\s+[A-Z]+){0,3}$/', $trimmed)) {
+				$flushSection();
+				$currentSection = $trimmed;
+			} else {
+				$buffer[] = $line;
+			}
+		}
+		$flushSection();
+
+		// Evidence pointers: one per section heading found
+		$evidence = [];
+		foreach ($sections as $heading => $body) {
+			$evidence[] = "inject:section={$heading}:" . mb_substr($body, 0, 80);
 		}
 
 		return new AdapterResult(
 			adapterName:       self::NAME,
-			success:           $text !== '',
+			success:           true,
 			producedFiles:     [$localOut],
 			structuredResults: [
-				'full_text'      => mb_substr($text, 0, 8000),
-				'questions'      => $questions,
-				'question_count' => count($questions),
-				'char_count'     => mb_strlen($text),
+				'full_text'     => mb_substr($text, 0, 8000),
+				'sections'      => $sections,
+				'section_count' => count($sections),
+				'char_count'    => mb_strlen($text),
+				'method'        => $method,
 			],
-			evidencePointers:  array_map(
-				fn($q) => "inject:line={$q['line']}:{$q['question']}",
-				array_slice($questions, 0, 20)
-			),
-			stdoutExcerpt:     "Extracted " . mb_strlen($text) . " chars, " . count($questions) . " questions from inject PDF",
-			stderrExcerpt:     mb_substr($result->stderr, 0, 500),
-			execResult:        $result,
+			evidencePointers:  array_slice($evidence, 0, 20),
+			stdoutExcerpt:     "Extracted " . mb_strlen($text) . " chars across " . count($sections) . " sections from inject PDF (via {$method})",
+			stderrExcerpt:     mb_substr($stderr, 0, 500),
+			execResult:        new ExecResult(0, '', $stderr, 0, $method, 'pdftotext'),
 		);
 	}
 }

@@ -129,8 +129,16 @@ abstract class BaseAdapter
 
 	protected function resolveFilePath(Workspace $case, string $path): string
 	{
+		// Absolute path — pass through as-is
 		if (str_starts_with($path, '/')) {
 			return $path;
+		}
+		// The model sometimes reads derived paths from tool output (e.g.
+		// "cases/test-ls25/derived/foo.txt") and passes them back verbatim.
+		// Strip the case dir prefix to avoid "cases/test-ls25/cases/test-ls25/..."
+		$caseDir = rtrim($case->caseDir, '/') . '/';
+		if (str_starts_with($path, $caseDir)) {
+			return $path; // already contains the full relative path from CWD
 		}
 		return "{$case->caseDir}/{$path}";
 	}
@@ -161,58 +169,5 @@ abstract class BaseAdapter
 			execResult: new ExecResult(-1, '', $msg, 0, 'local', $cmd),
 			error: $msg,
 		);
-	}
-}
-
-// ─────────────────────────────────────────────────────────────────
-// Adapter Registry
-// ─────────────────────────────────────────────────────────────────
-
-final class AdapterRegistry
-{
-	/** @var array<string, BaseAdapter> */
-	private static array $adapters = [];
-
-	public static function register(BaseAdapter $adapter): void
-	{
-		self::$adapters[$adapter::NAME] = $adapter;
-	}
-
-	public static function get(string $name): ?BaseAdapter
-	{
-		return self::$adapters[$name] ?? null;
-	}
-
-	/** @return list<array{name: string, description: string, target: string, schema: array}> */
-	public static function list(): array
-	{
-		$list = [];
-		foreach (self::$adapters as $a) {
-			$list[] = [
-				'name'        => $a::NAME,
-				'description' => $a::DESCRIPTION,
-				'target'      => $a::TARGET,
-				'schema'      => $a->getToolSchema(),
-			];
-		}
-		return $list;
-	}
-
-	/** Get all tool schemas formatted for Ollama tool-calling. */
-	public static function allToolSchemas(): array
-	{
-		$schemas = [];
-		foreach (self::$adapters as $a) {
-			$schemas[] = [
-				'type'     => 'function',
-				'function' => $a->getToolSchema(),
-			];
-		}
-		return $schemas;
-	}
-
-	public static function reset(): void
-	{
-		self::$adapters = [];
 	}
 }

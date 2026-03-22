@@ -74,6 +74,9 @@ final class FileID extends BaseAdapter
 	public const DESCRIPTION = 'Identify file type, compute hashes, measure entropy. Works on any single file.';
 	public const TARGET      = 'local';
 
+	/** Maximum bytes read from a file for entropy calculation (1 MiB). */
+	private const SAMPLE_BYTES = 1_048_576;
+
 	public function getToolSchema(): array
 	{
 		return [
@@ -112,14 +115,24 @@ final class FileID extends BaseAdapter
 		$results['md5']        = hash_file('md5', $fp);
 		$results['size_bytes'] = filesize($fp);
 
-		// Entropy
-		$data = file_get_contents($fp);
+		// Entropy + magic-byte detection
+		// Read only the first 1 MiB so that large PCAPs / memory images / disk
+		// images do not blow PHP's heap.  1 MiB is more than enough for a
+		// statistically reliable Shannon entropy estimate and for magic-byte
+		// detection (which only needs the first 4 bytes).
+		$fh   = fopen($fp, 'rb');
+		$data = $fh !== false ? fread($fh, self::SAMPLE_BYTES) : false;
+		if ($fh !== false) fclose($fh);
+
+		$sampled = $data !== false && $results['size_bytes'] > self::SAMPLE_BYTES;
+
 		if ($data !== false && strlen($data) > 0) {
-			$results['entropy'] = round($this->shannonEntropy($data), 4);
+			$results['entropy']         = round($this->shannonEntropy($data), 4);
+			$results['entropy_sampled'] = $sampled; // true = computed on first 1 MB only
 		}
 
-		// PE / ELF detection
-		if (strlen($data) >= 4) {
+		// PE / ELF detection (needs only the first 4 bytes — already in $data)
+		if ($data !== false && strlen($data) >= 4) {
 			$results['is_pe']  = str_starts_with($data, "MZ");
 			$results['is_elf'] = str_starts_with($data, "\x7fELF");
 		}
@@ -147,12 +160,15 @@ final class FileID extends BaseAdapter
 
 	private function shannonEntropy(string $data): float
 	{
-		$len  = strlen($data);
-		$freq = array_count_values(str_split($data));
-		$ent  = 0.0;
+		$len = strlen($data);
+		if ($len === 0) return 0.0;
 
-		foreach ($freq as $count) {
-			$p = $count / $len;
+		// count_chars(1) returns an array of [byte_value => occurrence_count]
+		// for every byte that appears at least once — all arithmetic in C,
+		// no per-byte PHP array allocation (unlike str_split + array_count_values).
+		$ent = 0.0;
+		foreach (count_chars($data, 1) as $count) {
+			$p    = $count / $len;
 			$ent -= $p * log($p, 2);
 		}
 
@@ -335,7 +351,7 @@ final class ATTACKMap extends BaseAdapter
 		'scheduled task|schtasks'                        => ['T1053.005', 'Scheduled Task/Job: Scheduled Task'],
 		'registry.*run|autorun|HKLM.*Run'                => ['T1547.001', 'Boot or Logon Autostart: Registry Run Keys'],
 		'powershell|pwsh|\.ps1'                          => ['T1059.001', 'Command and Scripting Interpreter: PowerShell'],
-		'cmd\.exe|cmd /c'                                => ['T1059.003', 'Command and Scripting Interpreter: Windows Command Shell'],
+		'cmd\.exe|cmd\ \/c'                                => ['T1059.003', 'Command and Scripting Interpreter: Windows Command Shell'],
 		'wmi|wmic'                                       => ['T1047', 'Windows Management Instrumentation'],
 		'certutil.*decode|certutil.*urlcache'            => ['T1140', 'Deobfuscate/Decode Files or Information'],
 		'base64|obfuscat'                                => ['T1027', 'Obfuscated Files or Information'],
@@ -384,7 +400,7 @@ final class ATTACKMap extends BaseAdapter
 
 		foreach ($observations as $obs) {
 			foreach (self::PATTERNS as $pattern => [$techId, $techName]) {
-				if (preg_match("/{$pattern}/i", $obs) && !isset($seen[$techId])) {
+				if (preg_match("#(?:{$pattern})#i", $obs) && !isset($seen[$techId])) {
 					$seen[$techId] = true;
 					$mappings[] = [
 						'technique_id'       => $techId,

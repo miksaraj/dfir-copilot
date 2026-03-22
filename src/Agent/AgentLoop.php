@@ -33,7 +33,7 @@ final class AgentLoop
 	private OllamaClient $client;
 	private array $conversationHistory = [];
 
-	public int $maxToolCallsPerCycle = 5;
+	public int $maxToolCallsPerCycle = 10;
 	public int $maxCycles            = 20;
 
 	private const WORKER_SYSTEM = <<<'PROMPT'
@@ -48,6 +48,12 @@ RULES:
 5. When you have enough evidence, propose hypotheses with explicit evidence pointers.
 6. For attribution, list matching AND conflicting signals for each actor candidate.
 
+TOOL PATH RULES (important — wrong paths cause silent failures):
+- 'file_path' and 'input_file' parameters expect paths RELATIVE to the case directory.
+  Examples of CORRECT paths: "raw/LS25/DUMP_ALL/FOR_1100/main.exe", "derived/main_strings.txt"
+  The case directory prefix (e.g. "cases/test-ls25/") must NOT be included.
+- Absolute paths (starting with /) are passed through as-is and are also fine.
+
 CURRENT CASE STATE:
 %CASE_STATE%
 
@@ -61,18 +67,22 @@ What should we do next?
 PROMPT;
 
 	private const JUDGE_SYSTEM = <<<'PROMPT'
-You are a senior DFIR reviewer. Verify analysis quality.
+You are a senior DFIR reviewer. Your job is to verify that analysis is honest and evidence-grounded,
+not to demand a complete investigation before approving anything.
 
-For each claim:
-1. CHECK every factual claim has an evidence pointer (tool output reference).
-2. REJECT claims that say "likely" or "probably" without evidence.
-3. DEMAND alternative hypotheses: "What else could explain this?"
-4. VERIFY minimum triage before attribution:
-   - File identification (type, hashes)
-   - String/IOC extraction
-   - At least one behavioural analysis (capa, YARA, or manual)
-   - Timeline consideration
-5. For attribution, require ≥2 independent evidence categories.
+EVALUATION RULES:
+1. SCOPE MATCH: Grade against what was actually attempted. A triage task does not require attribution.
+   A binary analysis does not require a full timeline. Approve partial work that is honest.
+2. EVIDENCE GROUNDING: Every factual claim (hash, file type, capability, IOC) must reference a tool
+   output. Reject fabricated or assumed facts.
+3. UNCERTAINTY: The analyst SHOULD say "likely" or "may indicate" when evidence is suggestive but not
+   conclusive. Do NOT penalise appropriate hedging — only penalise fabrication.
+4. COMPLETENESS vs ACCURACY: A short, accurate, evidence-backed analysis of 2 tools beats a long
+   analysis with made-up details. Approve the former.
+5. APPROVE when: all claims have tool backing, conclusions match the instruction scope, and gaps are
+   explicitly noted. Do NOT require attribution, timeline, or full triage for a single-binary task.
+6. REJECT when: claims are fabricated, paths or hashes are invented, or the analysis directly
+   contradicts what the tool outputs show.
 
 Respond ONLY with JSON:
 {
@@ -213,10 +223,28 @@ PROMPT;
 			}
 		}
 
-		return [
-			'response'        => $finalResponse ?? 'Worker cycle completed (max tool calls reached)',
-			'tool_calls_made' => $toolCallsMade,
-		];
+			// Budget exhausted before the model stopped calling tools.
+			// Ask for a final synthesis without offering any tools so the judge
+			// receives real analysis text rather than the fallback placeholder.
+			if ($finalResponse === null) {
+				$this->conversationHistory[] = [
+					'role'    => 'user',
+					'content' => 'Tool budget exhausted. Summarise your findings so far: what did you confirm, what IOCs/TTPs were found, what gaps remain, and what your current hypothesis is.',
+				];
+				$synthResponse = $this->client->chat(
+					model:    $this->getWorkerModel(),
+					messages: $this->conversationHistory,
+					tools:    [],   // no tools — force a prose response
+					thinking: $this->config->ollamaWorkerThinking,
+				);
+				$finalResponse = $synthResponse['message']['content'] ?? 'No synthesis produced.';
+				$this->conversationHistory[] = $synthResponse['message'] ?? [];
+			}
+
+			return [
+				'response'        => $finalResponse,
+				'tool_calls_made' => $toolCallsMade,
+			];
 	}
 
 	// ── Judge ────────────────────────────────────────────────────

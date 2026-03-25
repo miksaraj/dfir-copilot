@@ -15,6 +15,7 @@ $grouped = [
 	__DIR__ . '/src/Adapters/REMNuxAdapters.php',
 	__DIR__ . '/src/Adapters/FLAREAdapters.php',
 	__DIR__ . '/src/Adapters/RagAdapter.php',
+	__DIR__ . '/src/Adapters/DiskAdapters.php',
 ];
 foreach ($grouped as $file) {
 	if (file_exists($file)) {

@@ -7,6 +7,14 @@ Versioning follows a modified SemVer scheme: `<year>-<major>.<minor>.<patch>`.
 
 ---
 
+## [2026-0.3.1] — 2026-03-25
+
+### Fixed
+
+- **Missing `use` imports for new adapters** (`dfirbus.php`) — `ListDirectory` and `DecryptZip` were registered in `registerAllAdapters()` but not imported at the top of `dfirbus.php`, causing a fatal `Class not found` error at runtime. Added both classes to the existing `use DFIRCopilot\Adapters\{...}` import group.
+
+---
+
 ## [2026-0.3.0] — 2026-03-25
 
 ### Added
@@ -118,6 +126,7 @@ Initial public release. End-to-end DFIR analysis orchestration from a single PHP
 
 ---
 
+[2026-0.3.1]: https://github.com/miksaraj/dfir-copilot/releases/tag/2026-0.3.1
 [2026-0.3.0]: https://github.com/miksaraj/dfir-copilot/releases/tag/2026-0.3.0
 [2026-0.2.2]: https://github.com/miksaraj/dfir-copilot/releases/tag/2026-0.2.2
 [2026-0.2.1]: https://github.com/miksaraj/dfir-copilot/releases/tag/2026-0.2.1

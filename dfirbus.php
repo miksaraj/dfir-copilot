@@ -404,9 +404,39 @@ function cmdAgentAuto(Config $cfg, string $caseId, string $instruction, int $max
 	$results = $agent->runAuto($instruction, $maxCycles);
 
 	out("\nCompleted " . count($results) . " cycles.");
+
 	$reportPath = "{$case->notesDir}/agent_run.json";
-	file_put_contents($reportPath, json_encode($results, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES));
-	out("Full results saved to: {$reportPath}");
+
+	// Load existing runs (or start fresh)
+	$allRuns = [];
+	if (file_exists($reportPath) && filesize($reportPath) > 0) {
+		$decoded = json_decode(file_get_contents($reportPath), true);
+		// Handle both the old format (bare array of cycles) and the new format
+		// (array of run objects). If the first element has a 'run_id' key it's
+		// already in the new format; otherwise wrap the old data as a legacy run.
+		if (is_array($decoded) && !empty($decoded)) {
+			if (isset($decoded[0]['run_id'])) {
+				$allRuns = $decoded;  // new format — keep as-is
+			} else {
+				$allRuns = [[  // wrap old bare cycles array as a legacy run
+					'run_id'      => 1,
+					'timestamp'   => null,
+					'instruction' => '(legacy — instruction not recorded)',
+					'cycles'      => $decoded,
+				]];
+			}
+		}
+	}
+
+	$allRuns[] = [
+		'run_id'      => count($allRuns) + 1,
+		'timestamp'   => date('c'),
+		'instruction' => $instruction,
+		'cycles'      => $results,
+	];
+
+	file_put_contents($reportPath, json_encode($allRuns, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES));
+	out("Full results saved to: {$reportPath} (run #" . count($allRuns) . ")");
 }
 
 function cmdReport(Config $cfg, string $caseId): void

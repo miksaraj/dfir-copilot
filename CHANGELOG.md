@@ -7,6 +7,16 @@ Versioning follows a modified SemVer scheme: `<year>-<major>.<minor>.<patch>`.
 
 ---
 
+## [2026-0.4.3] — 2026-03-25
+
+### Added
+- `agent_run.json` now **accumulates** across runs instead of being overwritten. Each invocation of `agent-auto` appends a new run object (`run_id`, `timestamp`, `instruction`, `cycles`) to the file. This preserves the full investigation history for a given case.
+
+### Changed
+- The `agent_run.json` schema moves from a bare array of cycles to an array of run objects. Existing files in the old format are automatically migrated in-place on first read (wrapped as `run_id=1` with `instruction='(legacy)'`).
+
+---
+
 ## [2026-0.4.2] — 2026-03-25
 
 ### Fixed
@@ -174,6 +184,7 @@ Initial public release. End-to-end DFIR analysis orchestration from a single PHP
 
 ---
 
+[2026-0.4.3]: https://github.com/miksaraj/dfir-copilot/releases/tag/2026-0.4.3
 [2026-0.4.2]: https://github.com/miksaraj/dfir-copilot/releases/tag/2026-0.4.2
 [2026-0.4.1]: https://github.com/miksaraj/dfir-copilot/releases/tag/2026-0.4.1
 [2026-0.4.0]: https://github.com/miksaraj/dfir-copilot/releases/tag/2026-0.4.0

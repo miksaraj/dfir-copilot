@@ -7,6 +7,13 @@ Versioning follows a modified SemVer scheme: `<year>-<major>.<minor>.<patch>`.
 
 ---
 
+## [2026-0.4.2] — 2026-03-25
+
+### Fixed
+- Fixed critical timeout crashes where the agent attempted to run `strings_and_iocs` against 20GB disk images. Size limits and image extension guards (`.E01`, `.raw`, `.vmdk`) have been added to `strings_and_iocs`, `yara_scan`, and `extract_iocs` to forcefully pivot the agent to appropriate tools (e.g., `disk_timeline` or `mft_search`).
+
+---
+
 ## [2026-0.4.1] — 2026-03-25
 
 ### Fixed
@@ -167,6 +174,7 @@ Initial public release. End-to-end DFIR analysis orchestration from a single PHP
 
 ---
 
+[2026-0.4.2]: https://github.com/miksaraj/dfir-copilot/releases/tag/2026-0.4.2
 [2026-0.4.1]: https://github.com/miksaraj/dfir-copilot/releases/tag/2026-0.4.1
 [2026-0.4.0]: https://github.com/miksaraj/dfir-copilot/releases/tag/2026-0.4.0
 [2026-0.3.2]: https://github.com/miksaraj/dfir-copilot/releases/tag/2026-0.3.2

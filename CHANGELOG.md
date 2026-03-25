@@ -7,6 +7,13 @@ Versioning follows a modified SemVer scheme: `<year>-<major>.<minor>.<patch>`.
 
 ---
 
+## [2026-0.4.1] — 2026-03-25
+
+### Fixed
+- Fixed missing autoloader inclusion of the new `DiskAdapters.php` causing a fatal error.
+
+---
+
 ## [2026-0.4.0] — 2026-03-25
 
 ### Added
@@ -160,6 +167,7 @@ Initial public release. End-to-end DFIR analysis orchestration from a single PHP
 
 ---
 
+[2026-0.4.1]: https://github.com/miksaraj/dfir-copilot/releases/tag/2026-0.4.1
 [2026-0.4.0]: https://github.com/miksaraj/dfir-copilot/releases/tag/2026-0.4.0
 [2026-0.3.2]: https://github.com/miksaraj/dfir-copilot/releases/tag/2026-0.3.2
 [2026-0.3.1]: https://github.com/miksaraj/dfir-copilot/releases/tag/2026-0.3.1

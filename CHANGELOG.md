@@ -7,6 +7,14 @@ Versioning follows a modified SemVer scheme: `<year>-<major>.<minor>.<patch>`.
 
 ---
 
+## [2026-0.2.1] — 2026-03-25
+
+### Fixed
+
+- **`agent-auto` loop premature exit** (`src/Agent/AgentLoop.php`) — the auto-pilot loop previously stopped on the first cycle where `approved: true`, even when the judge simultaneously listed outstanding `required_actions`. The judge evaluates honesty of what has been done so far, not overall completeness, so an early approval with pending actions means "this is clean — keep going", not "we're finished". The termination condition is now `approved === true` **and** `required_actions` is empty. When approved-but-incomplete, the required actions are fed forward as the next instruction (with a distinct prefix so the worker knows it is building on solid ground rather than correcting errors). Console output distinguishes three states: genuinely complete, approved-but-continuing, and rejected.
+
+---
+
 ## [2026-0.2.0] — 2026-03-25
 
 ### Added
@@ -82,5 +90,6 @@ Initial public release. End-to-end DFIR analysis orchestration from a single PHP
 
 ---
 
+[2026-0.2.1]: https://github.com/miksaraj/dfir-copilot/releases/tag/2026-0.2.1
 [2026-0.2.0]: https://github.com/miksaraj/dfir-copilot/releases/tag/2026-0.2.0
 [2026-0.1.0]: https://github.com/miksaraj/dfir-copilot/releases/tag/2026-0.1.0

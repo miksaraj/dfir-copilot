@@ -16,7 +16,7 @@ use DFIRCopilot\Agent\{OllamaClient, AgentLoop};
 use DFIRCopilot\Executors\SSHExecutor;
 use DFIRCopilot\Executors\WinRMExecutor;
 use DFIRCopilot\Rag\KnowledgeBase;
-use DFIRCopilot\Adapters\{InjectPdfRead, EvtxParse, LogParse};
+use DFIRCopilot\Adapters\{InjectPdfRead, EvtxParse, LogParse, ListDirectory, DecryptZip};
 
 // ── Adapter registration ─────────────────────────────────────────
 

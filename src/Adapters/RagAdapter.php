@@ -69,15 +69,10 @@ final class KnowledgeSearch extends BaseAdapter
 		}
 
 		if ($kb->chunkCount() === 0) {
-			return new AdapterResult(
-				adapterName:       self::NAME,
-				success:           true,
-				producedFiles:     [],
-				structuredResults: ['results' => [], 'note' => 'Knowledge base is empty. Run: php dfirbus.php kb-index'],
-				evidencePointers:  [],
-				stdoutExcerpt:     'Knowledge base is empty — index documents first.',
-				stderrExcerpt:     '',
-				execResult:        new ExecResult(0, '', '', 0, 'local', "knowledge_search \"{$query}\""),
+			return $this->errorResult(
+				"Knowledge base is empty — no CTI has been indexed yet. " .
+				"Run: php dfirbus.php kb-index  before calling knowledge_search. " .
+				"Do NOT assume or fabricate search results; report this as a tool failure."
 			);
 		}
 

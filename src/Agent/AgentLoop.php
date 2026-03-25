@@ -41,12 +41,26 @@ You are a DFIR analyst copilot in a Locked Shields CDX forensics exercise.
 You have access to tools (adapters) to analyse evidence.
 
 RULES:
-1. NEVER fabricate evidence. Every claim must reference a specific tool output.
+1. NEVER fabricate evidence. Every claim must reference a specific tool output FROM THIS CYCLE.
 2. Use tools systematically: identify files → triage → extract IOCs → build timeline → map TTPs → attribute.
 3. When you call a tool, explain WHY (what gap it fills).
 4. After each tool result, summarise what you learned and what questions remain.
 5. When you have enough evidence, propose hypotheses with explicit evidence pointers.
 6. For attribution, list matching AND conflicting signals for each actor candidate.
+
+CRITICAL — ANTI-FABRICATION RULES:
+- If a tool call returns an ERROR, report the error. Do NOT invent what the output "would have" shown.
+- If a tool does not exist ("Unknown tool" error), report it and call a different tool. Do NOT fabricate responses for tools that fail.
+- Do NOT include JSON tool-response blocks in your analysis unless they came from a real tool call this cycle.
+- If knowledge_search returns an error (KB empty), do NOT invent threat intelligence results. State the KB is unavailable.
+- Your analysis must be consistent with the tool calls you actually made. If you made zero tool calls, you have zero new evidence.
+
+FILE DISCOVERY — use list_directory first:
+- Before calling file_id, log_parse, extract_iocs, or strings_and_iocs on a file, call list_directory on the parent directory
+  to confirm the file exists and learn its exact path.
+- Call list_directory("raw/") at the start of every investigation to understand what evidence is present.
+- If list_directory reports a .zip file: check whether it has been extracted. If the scenario inject mentions
+  a password, use decrypt_zip to extract it before running other tools on its contents.
 
 TOOL PATH RULES (important — wrong paths cause silent failures):
 - 'file_path' and 'input_file' parameters expect paths RELATIVE to the case directory.
@@ -83,6 +97,12 @@ EVALUATION RULES:
    explicitly noted. Do NOT require attribution, timeline, or full triage for a single-binary task.
 6. REJECT when: claims are fabricated, paths or hashes are invented, or the analysis directly
    contradicts what the tool outputs show.
+7. ZERO-TOOL FABRICATION (CRITICAL): You will be told how many tool calls were made this cycle
+   ("Tool calls this cycle: N"). If N=0 but the analysis contains JSON tool-response blocks, cites
+   specific tool outputs (hashes, entropy values, IOC lists, strings results), or presents structured
+   adapter results — REJECT immediately. This is fabrication. The analyst invented tool outputs.
+   Exception: the analyst may reference tool outputs from PREVIOUS cycles if they explicitly cite them
+   as prior findings rather than presenting them as newly run results.
 
 Respond ONLY with JSON:
 {
@@ -138,7 +158,12 @@ PROMPT;
 		$adapter = AdapterRegistry::get($funcName);
 		if ($adapter === null) {
 			$available = array_column(AdapterRegistry::list(), 'name');
-			return ['error' => "Unknown tool: {$funcName}", 'available_tools' => $available];
+			return [
+				'TOOL_ERROR'      => true,
+				'success'         => false,
+				'error'           => "Unknown tool: {$funcName}. This tool does not exist — do NOT invent its output. Choose from the available tools instead.",
+				'available_tools' => $available,
+			];
 		}
 
 		try {
@@ -256,18 +281,32 @@ PROMPT;
 	 * zero swap overhead. The judge system prompt is the only difference.
 	 * Non-thinking mode is used for speed since evaluation is simpler than analysis.
 	 */
-	public function runJudge(string $workerOutput): array
+	public function runJudge(string $workerOutput, int $toolCallsThisCycle = 0): array
 	{
 		$state  = $this->case->getState();
 		$ledger = $this->case->getLedger();
+
+		// Provide the last 5 ledger entries so the judge can verify claims are
+		// grounded in recently run tools (not fabricated or from prior cycles).
+		$recentTools = array_map(
+			fn(array $e) => [
+				'tool'      => $e['tool_name'],
+				'exit_code' => $e['exit_code'],
+				'files_out' => $e['output_paths'] ?? [],
+			],
+			array_slice($ledger, -5)
+		);
 
 		$judgeMessages = [
 			['role' => 'system', 'content' => self::JUDGE_SYSTEM],
 			[
 				'role'    => 'user',
 				'content' => "Review this analysis:\n\n{$workerOutput}\n\n"
-					. "Case state: " . mb_substr(json_encode($state, JSON_PRETTY_PRINT), 0, 2000) . "\n\n"
-					. "Tools run: " . json_encode(array_column($ledger, 'tool_name')) . "\n\n"
+					. "Tool calls this cycle: {$toolCallsThisCycle}\n"
+					. "(If this is 0, any tool-output JSON blocks in the analysis are fabricated — apply Rule 7.)\n\n"
+					. "Recent tools run (last 5 from provenance ledger): " . json_encode($recentTools, JSON_PRETTY_PRINT) . "\n\n"
+					. "All tools run this case: " . json_encode(array_column($ledger, 'tool_name')) . "\n\n"
+					. "Case state: " . mb_substr(json_encode($state, JSON_PRETTY_PRINT), 0, 1500) . "\n\n"
 					. "Provide your verdict as JSON.",
 			],
 		];
@@ -306,7 +345,10 @@ PROMPT;
 	public function runFullCycle(string $instruction = ''): array
 	{
 		$workerResult = $this->runWorkerCycle($instruction);
-		$judgeVerdict = $this->runJudge($workerResult['response']);
+		$judgeVerdict = $this->runJudge(
+			$workerResult['response'],
+			$workerResult['tool_calls_made'],
+		);
 
 		return [
 			'worker_analysis'  => $workerResult['response'],

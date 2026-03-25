@@ -38,6 +38,8 @@ function registerAllAdapters(): void
 	AdapterRegistry::register(new InjectPdfRead());
 	AdapterRegistry::register(new EvtxParse());
 	AdapterRegistry::register(new LogParse());
+	AdapterRegistry::register(new ListDirectory());
+	AdapterRegistry::register(new DecryptZip());
 }
 
 // ── CLI helpers ──────────────────────────────────────────────────

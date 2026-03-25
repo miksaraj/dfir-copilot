@@ -729,3 +729,272 @@ final class LogParse extends BaseAdapter
 		);
 	}
 }
+
+// ─────────────────────────────────────────────────────────────────
+// list_directory
+// ─────────────────────────────────────────────────────────────────
+
+/**
+ * Lists files and subdirectories within a path inside the case workspace.
+ * Solves the path-discovery problem: instead of guessing filenames, the
+ * agent can enumerate what actually exists before calling other tools.
+ */
+final class ListDirectory extends BaseAdapter
+{
+	public const NAME        = 'list_directory';
+	public const VERSION     = '1.0.0';
+	public const DESCRIPTION = 'List files and subdirectories at a path inside the case workspace. Use this to discover what evidence files actually exist before trying to analyse them. Call with "raw/" to see top-level evidence, or "raw/evidence/" to go deeper.';
+	public const TARGET      = 'local';
+
+	public function getToolSchema(): array
+	{
+		return [
+			'name'        => self::NAME,
+			'description' => self::DESCRIPTION,
+			'parameters'  => [
+				'type'       => 'object',
+				'properties' => [
+					'path' => [
+						'type'        => 'string',
+						'description' => 'Directory to list (relative to case dir, e.g. "raw/", "raw/evidence/", "derived/"). Defaults to "raw/" if omitted.',
+						'default'     => 'raw/',
+					],
+					'recursive' => [
+						'type'        => 'boolean',
+						'description' => 'If true, list all files recursively (may be long). Default false = one level only.',
+						'default'     => false,
+					],
+				],
+				'required' => [],
+			],
+		];
+	}
+
+	protected function execute(Workspace $case, Config $config, array $params): AdapterResult
+	{
+		$relPath   = ltrim($params['path'] ?? 'raw/', '/');
+		$recursive = (bool) ($params['recursive'] ?? false);
+		$absPath   = rtrim($case->caseDir, '/') . '/' . $relPath;
+
+		if (!is_dir($absPath)) {
+			// Be helpful: if it doesn't exist, say so clearly and list what does
+			$topLevel = [];
+			foreach (scandir($case->caseDir) ?: [] as $entry) {
+				if ($entry !== '.' && $entry !== '..') {
+					$topLevel[] = $entry . (is_dir("{$case->caseDir}/{$entry}") ? '/' : '');
+				}
+			}
+			return $this->errorResult(
+				"Directory not found: {$relPath}\n" .
+				"Top-level case contents: " . implode(', ', $topLevel)
+			);
+		}
+
+		$entries = [];
+
+		if ($recursive) {
+			$iter = new \RecursiveIteratorIterator(
+				new \RecursiveDirectoryIterator($absPath, \FilesystemIterator::SKIP_DOTS),
+				\RecursiveIteratorIterator::LEAVES_ONLY
+			);
+			foreach ($iter as $file) {
+				/** @var \SplFileInfo $file */
+				$rel       = ltrim(str_replace($case->caseDir . '/', '', $file->getPathname()), '/');
+				$entries[] = [
+					'path'       => $rel,
+					'type'       => 'file',
+					'size_bytes' => $file->getSize(),
+				];
+			}
+		} else {
+			foreach (scandir($absPath) ?: [] as $entry) {
+				if ($entry === '.' || $entry === '..') continue;
+				$full      = "{$absPath}/{$entry}";
+				$rel       = rtrim($relPath, '/') . '/' . $entry;
+				$isDir     = is_dir($full);
+				$entries[] = [
+					'path'       => $rel . ($isDir ? '/' : ''),
+					'type'       => $isDir ? 'directory' : 'file',
+					'size_bytes' => $isDir ? null : filesize($full),
+				];
+			}
+		}
+
+		usort($entries, fn($a, $b) => strcmp($a['type'] . $a['path'], $b['type'] . $b['path']));
+
+		// Flag any large ZIPs that look unextracted
+		$zipWarnings = [];
+		foreach ($entries as $e) {
+			if ($e['type'] === 'file' && str_ends_with(strtolower($e['path']), '.zip') && ($e['size_bytes'] ?? 0) > 1_000_000) {
+				$zipWarnings[] = "NOTE: {$e['path']} is a ZIP archive ({$e['size_bytes']} bytes) — if the scenario mentions this evidence, ensure it has been extracted first (use decrypt_zip if password-protected, or unzip manually).";
+			}
+		}
+
+		$result = [
+			'listed_path' => $relPath,
+			'count'       => count($entries),
+			'entries'     => $entries,
+		];
+		if (!empty($zipWarnings)) {
+			$result['zip_warnings'] = $zipWarnings;
+		}
+
+		return new AdapterResult(
+			adapterName:       self::NAME,
+			success:           true,
+			producedFiles:     [],
+			structuredResults: $result,
+			evidencePointers:  [],
+			stdoutExcerpt:     "Listed {$relPath}: " . count($entries) . " entries" .
+				(!empty($zipWarnings) ? ' [ZIP WARNING: see zip_warnings]' : ''),
+			stderrExcerpt:     '',
+			execResult:        new ExecResult(0, '', '', 0, 'local', "list_directory {$relPath}"),
+		);
+	}
+}
+
+// ─────────────────────────────────────────────────────────────────
+// decrypt_zip
+// ─────────────────────────────────────────────────────────────────
+
+/**
+ * Extracts a password-protected (or plain) ZIP archive into a target
+ * directory inside the case workspace. Uses PHP's ZipArchive.
+ *
+ * This replaces the non-existent "decrypt_file" tool the LLM was
+ * repeatedly hallucinating.
+ */
+final class DecryptZip extends BaseAdapter
+{
+	public const NAME        = 'decrypt_zip';
+	public const VERSION     = '1.0.0';
+	public const DESCRIPTION = 'Extract a ZIP archive (optionally password-protected) into a directory inside the case workspace. Use this when the inject PDF provides a password for an evidence ZIP that has not yet been extracted.';
+	public const TARGET      = 'local';
+
+	public function getToolSchema(): array
+	{
+		return [
+			'name'        => self::NAME,
+			'description' => self::DESCRIPTION,
+			'parameters'  => [
+				'type'       => 'object',
+				'properties' => [
+					'zip_path' => [
+						'type'        => 'string',
+						'description' => 'Path to the ZIP file (relative to case dir, e.g. "raw/evidence.zip")',
+					],
+					'dest_path' => [
+						'type'        => 'string',
+						'description' => 'Destination directory (relative to case dir, e.g. "raw/evidence/"). Created if it does not exist.',
+					],
+					'password' => [
+						'type'        => 'string',
+						'description' => 'ZIP password (if the archive is password-protected). Leave empty for plain ZIPs.',
+						'default'     => '',
+					],
+				],
+				'required' => ['zip_path', 'dest_path'],
+			],
+		];
+	}
+
+	protected function execute(Workspace $case, Config $config, array $params): AdapterResult
+	{
+		$zipPath  = $this->resolveFilePath($case, $this->requireParam($params, 'zip_path'));
+		$destRel  = $this->requireParam($params, 'dest_path');
+		$destPath = $this->resolveFilePath($case, $destRel);
+		$password = $params['password'] ?? '';
+
+		if (!file_exists($zipPath)) {
+			return $this->errorResult("ZIP not found: {$zipPath}");
+		}
+
+		if (!class_exists('ZipArchive')) {
+			return $this->errorResult("PHP ZipArchive extension is not available on this system.");
+		}
+
+		if (!is_dir($destPath)) {
+			mkdir($destPath, 0755, true);
+		}
+
+		$zip = new \ZipArchive();
+		$res = $zip->open($zipPath);
+		if ($res !== true) {
+			$codes = [
+				\ZipArchive::ER_NOZIP   => 'not a ZIP archive',
+				\ZipArchive::ER_INCONS  => 'archive is inconsistent',
+				\ZipArchive::ER_MEMORY  => 'malloc failure',
+				\ZipArchive::ER_NOENT   => 'file not found',
+				\ZipArchive::ER_OPEN    => 'cannot open file',
+			];
+			return $this->errorResult("Failed to open ZIP ({$zipPath}): " . ($codes[$res] ?? "error code {$res}"));
+		}
+
+		if ($password !== '') {
+			$zip->setPassword($password);
+		}
+
+		$extracted = 0;
+		$failed    = [];
+
+		for ($i = 0; $i < $zip->numFiles; $i++) {
+			$name = $zip->getNameIndex($i);
+			if ($name === false) continue;
+
+			$target = rtrim($destPath, '/') . '/' . $name;
+
+			// Create parent directories
+			$dir = dirname($target);
+			if (!is_dir($dir)) {
+				mkdir($dir, 0755, true);
+			}
+
+			// Skip directory entries
+			if (str_ends_with($name, '/')) {
+				continue;
+			}
+
+			$content = $zip->getFromIndex($i);
+			if ($content === false) {
+				$failed[] = $name;
+				continue;
+			}
+
+			file_put_contents($target, $content);
+			$extracted++;
+		}
+
+		$zip->close();
+
+		if ($extracted === 0 && !empty($failed)) {
+			return $this->errorResult(
+				"Extraction failed for all {$zip->numFiles} files. " .
+				($password !== '' ? "Password may be incorrect. " : '') .
+				"Failed entries: " . implode(', ', array_slice($failed, 0, 10))
+			);
+		}
+
+		$summary = "Extracted {$extracted} file(s) to {$destRel}";
+		if (!empty($failed)) {
+			$summary .= " ({" . count($failed) . "} failed: " . implode(', ', array_slice($failed, 0, 5)) . ")";
+		}
+
+		return new AdapterResult(
+			adapterName:       self::NAME,
+			success:           true,
+			producedFiles:     [$destPath],
+			structuredResults: [
+				'zip_path'   => $zipPath,
+				'dest_path'  => $destPath,
+				'extracted'  => $extracted,
+				'failed'     => $failed,
+				'next_step'  => "Run list_directory on \"{$destRel}\" to see the extracted files, then analyse them.",
+			],
+			evidencePointers:  ["decrypt_zip:{$destRel}:extracted={$extracted}"],
+			stdoutExcerpt:     $summary,
+			stderrExcerpt:     empty($failed) ? '' : count($failed) . ' files failed to extract',
+			execResult:        new ExecResult(0, '', '', 0, 'local', "decrypt_zip " . basename($zipPath)),
+		);
+	}
+}
+

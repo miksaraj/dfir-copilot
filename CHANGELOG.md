@@ -7,6 +7,26 @@ Versioning follows a modified SemVer scheme: `<year>-<major>.<minor>.<patch>`.
 
 ---
 
+## [2026-0.3.0] — 2026-03-25
+
+### Added
+
+- **`list_directory` adapter** (`src/Adapters/HostAdapters.php`) — lets the agent enumerate files and subdirectories inside the case workspace on demand instead of guessing paths. Returns sorted entries with types and sizes. Automatically flags any `.zip` files over 1 MB with a warning that they may not have been extracted yet, solving the silent "file not found" loop seen in for_400.
+
+- **`decrypt_zip` adapter** (`src/Adapters/HostAdapters.php`) — extracts a password-protected (or plain) ZIP archive into a destination directory using PHP's native `ZipArchive`. Replaces the non-existent `decrypt_file` tool the LLM was repeatedly hallucinating. Returns an extraction count and a `next_step` hint to call `list_directory` on the output.
+
+### Fixed
+
+- **Worker fabricates tool outputs in zero-tool cycles** (`src/Agent/AgentLoop.php`) — the worker system prompt now contains explicit anti-fabrication rules: do not invent tool responses for failed or non-existent tools, do not include JSON tool-response blocks for tools not called this cycle, report knowledge_search errors rather than inventing CTI hits.
+
+- **Judge does not detect zero-tool fabrication** (`src/Agent/AgentLoop.php`) — the judge now receives `tool_calls_made` for the current cycle and the last 5 provenance ledger entries. A new Rule 7 instructs the judge to reject immediately if `tool_calls_made=0` but the analysis presents structured tool-output JSON (fabrication). Unknown-tool errors now carry a `TOOL_ERROR: true` flag so they are unambiguous.
+
+- **Empty knowledge base returns ambiguous empty array** (`src/Adapters/RagAdapter.php`) — `knowledge_search` now returns `errorResult()` (success: false, error set) when the KB has zero chunks, rather than a successful response with an empty results array. An empty array looked like "no matches found", which the LLM treated as license to supply its own matches.
+
+- **Worker has no file discovery capability** (`src/Agent/AgentLoop.php`) — worker prompt now instructs the agent to call `list_directory("raw/")` at the start of every investigation and to call `list_directory` on a parent directory before attempting to access any file path.
+
+---
+
 ## [2026-0.2.2] — 2026-03-25
 
 ### Fixed
@@ -98,6 +118,7 @@ Initial public release. End-to-end DFIR analysis orchestration from a single PHP
 
 ---
 
+[2026-0.3.0]: https://github.com/miksaraj/dfir-copilot/releases/tag/2026-0.3.0
 [2026-0.2.2]: https://github.com/miksaraj/dfir-copilot/releases/tag/2026-0.2.2
 [2026-0.2.1]: https://github.com/miksaraj/dfir-copilot/releases/tag/2026-0.2.1
 [2026-0.2.0]: https://github.com/miksaraj/dfir-copilot/releases/tag/2026-0.2.0

@@ -918,3 +918,276 @@ BASH;
 		);
 	}
 }
+// ─────────────────────────────────────────────────────────────────
+// pcap_filter
+// ─────────────────────────────────────────────────────────────────
+
+final class PcapFilter extends BaseAdapter
+{
+	public const NAME        = 'pcap_filter';
+	public const VERSION     = '1.0.0';
+	public const DESCRIPTION = 'Filter a PCAP/PCAPNG with a Wireshark display filter and extract specific fields using tshark. Use for targeted queries — e.g. filter by IP, HTTP requests, DNS queries — more detailed than pcap_summary.';
+	public const TARGET      = 'remnux';
+
+	public function getToolSchema(): array
+	{
+		return [
+			'name'        => self::NAME,
+			'description' => self::DESCRIPTION,
+			'parameters'  => [
+				'type'       => 'object',
+				'properties' => [
+					'pcap_path' => ['type' => 'string', 'description' => 'Path to PCAP/PCAPNG (relative to case dir).'],
+					'filter'    => ['type' => 'string', 'description' => 'Wireshark display filter, e.g. "ip.addr==18.165.122.89", "http.request", "tcp.port==443".'],
+					'fields'    => ['type' => 'array', 'items' => ['type' => 'string'], 'description' => 'tshark fields to extract, e.g. ["ip.src","ip.dst","http.request.uri","dns.qry.name"]. Defaults to frame time + src/dst + info.', 'default' => []],
+					'max_packets' => ['type' => 'integer', 'description' => 'Max packets to return (default: 500).', 'default' => 500],
+				],
+				'required' => ['pcap_path', 'filter'],
+			],
+		];
+	}
+
+	protected function execute(Workspace $case, Config $config, array $params): AdapterResult
+	{
+		$fp         = $this->resolveFilePath($case, $this->requireParam($params, 'pcap_path'));
+		$filter     = $this->requireParam($params, 'filter');
+		$fields     = $params['fields'] ?? [];
+		$maxPackets = (int) ($params['max_packets'] ?? 500);
+
+		if (!file_exists($fp)) return $this->errorResult("File not found: {$fp}");
+
+		$ssh       = remnux_ssh($config);
+		$remoteDir = $config->remnuxWorkDir;
+		$ssh->run("mkdir -p '{$remoteDir}'");
+		$transfer  = SharedPath::ensureOnREMnux($fp, $config, $ssh, $remoteDir);
+		$remoteFp  = $transfer['path'];
+
+		if (empty($fields)) {
+			$fields = ['frame.time', 'ip.src', 'ip.dst', '_ws.col.Info'];
+		}
+
+		$fieldArgs = implode(' ', array_map(fn($f) => '-e ' . escapeshellarg($f), $fields));
+		$remoteOut = "{$remoteDir}/pcap_filter_out.txt";
+		$r = $ssh->run(
+"tshark -r '{$remoteFp}' -Y " . escapeshellarg($filter)
+. " -T fields {$fieldArgs} -E separator='|' -c {$maxPackets} > '{$remoteOut}' 2>/dev/null",
+120,
+);
+
+		$stem     = pathinfo($fp, PATHINFO_FILENAME);
+		$localOut = "{$case->derivedDir}/{$stem}_filtered.txt";
+		$ssh->copyFrom($remoteOut, $localOut);
+		$ssh->run("rm -f '{$remoteOut}'");
+		if ($transfer['method'] === 'sftp') $ssh->run("rm -f '{$remoteFp}'");
+
+		$lines   = array_filter(array_map('trim', explode("\n", file_exists($localOut) ? file_get_contents($localOut) : '')));
+		$count   = count($lines);
+		$records = [];
+		$evidence = [];
+		foreach (array_slice($lines, 0, 200) as $l) {
+			$parts     = explode('|', $l);
+			$records[] = array_combine(array_slice($fields, 0, count($parts)), $parts) ?: ['raw' => $l];
+			$evidence[] = 'pcap_filter:' . mb_substr($l, 0, 120);
+		}
+
+		$outJson = "{$case->derivedDir}/{$stem}_filtered.json";
+		$this->writeJson($outJson, $records);
+
+		return new AdapterResult(
+adapterName:       self::NAME,
+success:           $count > 0,
+			producedFiles:     [$outJson, $localOut],
+			structuredResults: ['filter' => $filter, 'packet_count' => $count, 'fields' => $fields, 'records' => $records],
+			evidencePointers:  array_slice($evidence, 0, 50),
+			stdoutExcerpt:     "pcap_filter '{$filter}': {$count} packets matched",
+			stderrExcerpt:     mb_substr($r->stderr, 0, 300),
+			execResult:        new ExecResult($r->exitCode, '', $r->stderr, 0, "ssh:{$config->remnuxHost}", 'pcap_filter'),
+		);
+	}
+}
+
+// ─────────────────────────────────────────────────────────────────
+// pcap_carve
+// ─────────────────────────────────────────────────────────────────
+
+final class PcapCarve extends BaseAdapter
+{
+	public const NAME        = 'pcap_carve';
+	public const VERSION     = '1.0.0';
+	public const DESCRIPTION = 'Extract TCP streams and transferred files from a PCAP using tcpflow on REMnux. Recovers files dropped via HTTP, uploaded via FTP, or exfiltrated over raw TCP. Returns a list of carved streams with magic-byte identification.';
+	public const TARGET      = 'remnux';
+
+	public function getToolSchema(): array
+	{
+		return [
+			'name'        => self::NAME,
+			'description' => self::DESCRIPTION,
+			'parameters'  => [
+				'type'       => 'object',
+				'properties' => [
+					'pcap_path' => ['type' => 'string', 'description' => 'Path to PCAP/PCAPNG (relative to case dir).'],
+					'filter'    => ['type' => 'string', 'description' => 'Optional BPF filter, e.g. "host 18.165.122.89" or "port 80".', 'default' => ''],
+				],
+				'required' => ['pcap_path'],
+			],
+		];
+	}
+
+	protected function execute(Workspace $case, Config $config, array $params): AdapterResult
+	{
+		$fp  = $this->resolveFilePath($case, $this->requireParam($params, 'pcap_path'));
+		$bpf = trim($params['filter'] ?? '');
+
+		if (!file_exists($fp)) return $this->errorResult("File not found: {$fp}");
+
+		$ssh       = remnux_ssh($config);
+		$remoteDir = $config->remnuxWorkDir;
+		$ssh->run("mkdir -p '{$remoteDir}'");
+		$transfer  = SharedPath::ensureOnREMnux($fp, $config, $ssh, $remoteDir);
+		$remoteFp  = $transfer['path'];
+
+		$carveDir = "{$remoteDir}/pcap_carve_out";
+		$ssh->run("mkdir -p '{$carveDir}'");
+
+		$bpfArg = $bpf !== '' ? escapeshellarg($bpf) : '';
+		$r = $ssh->run("tcpflow -r '{$remoteFp}' -o '{$carveDir}' {$bpfArg} 2>/dev/null", 300);
+
+		$listR = $ssh->run(
+"find '{$carveDir}' -type f ! -name '*.html' ! -name 'report*' | head -100"
+. " | while read f; do sz=\$(stat -c%s \"\$f\" 2>/dev/null||echo 0); mg=\$(file -b \"\$f\" 2>/dev/null|head -c80); echo \"\$sz|\$mg|\$f\"; done",
+60,
+);
+
+		$stem       = pathinfo($fp, PATHINFO_FILENAME);
+		$localCarve = "{$case->derivedDir}/pcap_carved_{$stem}";
+		if (!is_dir($localCarve)) mkdir($localCarve, 0755, true);
+
+		$carved      = [];
+		$evidence    = [];
+		$interesting = ['PE32', 'ELF', 'PDF document', 'Zip', 'script', 'executable', 'JPEG', 'PNG', 'XML'];
+
+		foreach (array_filter(array_map('trim', explode("\n", $listR->stdout))) as $line) {
+			$parts = explode('|', $line, 3);
+			if (count($parts) < 3) continue;
+			[$size, $magic, $remotePath] = $parts;
+			$fname   = basename($remotePath);
+			$entry   = ['file' => $fname, 'size_bytes' => (int) $size, 'magic' => trim($magic)];
+			$carved[] = $entry;
+			foreach ($interesting as $kw) {
+				if (stripos($magic, $kw) !== false) {
+					$ssh->copyFrom($remotePath, "{$localCarve}/{$fname}");
+					$evidence[] = "carved:{$kw}:{$fname}:size={$size}";
+					break;
+				}
+			}
+		}
+
+		$ssh->run("rm -rf '{$carveDir}'");
+		if ($transfer['method'] === 'sftp') $ssh->run("rm -f '{$remoteFp}'");
+
+		$outJson = "{$case->derivedDir}/{$stem}_pcap_carved.json";
+		$this->writeJson($outJson, $carved);
+
+		return new AdapterResult(
+adapterName:       self::NAME,
+success:           !empty($carved),
+producedFiles:     [$outJson],
+structuredResults: ['total_streams' => count($carved), 'interesting_count' => count($evidence), 'carved' => $carved],
+			evidencePointers:  array_slice($evidence, 0, 30),
+			stdoutExcerpt:     "pcap_carve: " . count($carved) . " streams, " . count($evidence) . " interesting files",
+			stderrExcerpt:     mb_substr($r->stderr, 0, 300),
+			execResult:        new ExecResult($r->exitCode, '', $r->stderr, 0, "ssh:{$config->remnuxHost}", 'pcap_carve'),
+		);
+	}
+}
+
+// ─────────────────────────────────────────────────────────────────
+// oletools_analyze
+// ─────────────────────────────────────────────────────────────────
+
+final class OletoolsAnalyze extends BaseAdapter
+{
+	public const NAME        = 'oletools_analyze';
+	public const VERSION     = '1.0.0';
+	public const DESCRIPTION = 'Analyse Office documents (doc/docx/xls/xlsm/ppt/rtf) for VBA macros, embedded scripts, and malicious patterns using oletools (olevba + mraptor) on REMnux. Critical for phishing and malicious document scenarios.';
+	public const TARGET      = 'remnux';
+
+	public function getToolSchema(): array
+	{
+		return [
+			'name'        => self::NAME,
+			'description' => self::DESCRIPTION,
+			'parameters'  => [
+				'type'       => 'object',
+				'properties' => [
+					'file_path' => ['type' => 'string', 'description' => 'Path to Office document (relative to case dir).'],
+				],
+				'required' => ['file_path'],
+			],
+		];
+	}
+
+	protected function execute(Workspace $case, Config $config, array $params): AdapterResult
+	{
+		$fp = $this->resolveFilePath($case, $this->requireParam($params, 'file_path'));
+		if (!file_exists($fp)) return $this->errorResult("File not found: {$fp}");
+
+		$ssh       = remnux_ssh($config);
+		$remoteDir = $config->remnuxWorkDir;
+		$ssh->run("mkdir -p '{$remoteDir}'");
+		$transfer  = SharedPath::ensureOnREMnux($fp, $config, $ssh, $remoteDir);
+		$remoteFp  = $transfer['path'];
+
+		$stem      = pathinfo($fp, PATHINFO_FILENAME);
+		$remoteOut = "{$remoteDir}/olevba_out.txt";
+
+		$rOle  = $ssh->run("olevba --json '{$remoteFp}' > '{$remoteOut}' 2>/dev/null || olevba '{$remoteFp}' > '{$remoteOut}' 2>&1", 120);
+		$rMrap = $ssh->run("mraptor '{$remoteFp}' 2>/dev/null", 60);
+
+		$localOle = "{$case->derivedDir}/{$stem}_olevba.txt";
+		$ssh->copyFrom($remoteOut, $localOle);
+		$ssh->run("rm -f '{$remoteOut}'");
+		if ($transfer['method'] === 'sftp') $ssh->run("rm -f '{$remoteFp}'");
+
+		$raw  = file_exists($localOle) ? file_get_contents($localOle) : '';
+		$data = json_decode($raw, true);
+		if (!is_array($data)) {
+			$data = ['raw_output' => mb_substr($raw, 0, 6000)];
+		}
+
+		$mrapLine = trim($rMrap->stdout);
+		$risk     = match(true) {
+			str_contains($mrapLine, 'SUSPICIOUS')     => 'suspicious',
+			str_contains($mrapLine, 'NOT SUSPICIOUS') => 'not_suspicious',
+			str_contains($mrapLine, 'ERROR')           => 'error',
+			default                                    => 'unknown',
+		};
+
+		$evidence   = ["ole:" . basename($fp) . ":mraptor={$risk}"];
+		$hasMacros  = false;
+		foreach ($data['macros'] ?? [] as $m) {
+			$hasMacros  = true;
+			$evidence[] = "ole:macro:" . mb_substr($m['vba_code'] ?? '', 0, 80);
+		}
+		foreach ($data['iocs'] ?? [] as $ioc) {
+			$evidence[] = "ole:ioc:" . mb_substr((string)($ioc['value'] ?? $ioc), 0, 80);
+		}
+		if (!$hasMacros && str_contains($mrapLine, 'SUSPICIOUS')) {
+			$hasMacros = true;
+		}
+
+		$outJson = "{$case->derivedDir}/{$stem}_oletools.json";
+		$this->writeJson($outJson, ['file' => basename($fp), 'mraptor' => ['risk' => $risk, 'output' => $mrapLine], 'olevba' => $data]);
+
+		return new AdapterResult(
+			adapterName:       self::NAME,
+			success:           true,
+			producedFiles:     [$outJson, $localOle],
+			structuredResults: ['risk' => $risk, 'has_macros' => $hasMacros, 'mraptor' => $mrapLine, 'olevba' => $data],
+			evidencePointers:  array_slice($evidence, 0, 30),
+			stdoutExcerpt:     "oletools: risk={$risk}, macros=" . ($hasMacros ? 'YES' : 'NO'),
+			stderrExcerpt:     mb_substr($rOle->stderr, 0, 300),
+			execResult:        new ExecResult($rOle->exitCode, '', $rOle->stderr, 0, "ssh:{$config->remnuxHost}", 'oletools_analyze'),
+		);
+	}
+}

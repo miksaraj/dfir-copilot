@@ -17,6 +17,8 @@ use DFIRCopilot\Executors\SSHExecutor;
 use DFIRCopilot\Executors\WinRMExecutor;
 use DFIRCopilot\Rag\KnowledgeBase;
 use DFIRCopilot\Adapters\{InjectPdfRead, EvtxParse, LogParse, ListDirectory, DecryptZip};
+use DFIRCopilot\Adapters\{DiskTimeline, MftSearch, RegistryParse, PrefetchParse};
+use DFIRCopilot\Adapters\{PcapFilter, PcapCarve, OletoolsAnalyze};
 
 // ── Adapter registration ─────────────────────────────────────────
 
@@ -40,6 +42,15 @@ function registerAllAdapters(): void
 	AdapterRegistry::register(new LogParse());
 	AdapterRegistry::register(new ListDirectory());
 	AdapterRegistry::register(new DecryptZip());
+	// Tier 1 — disk image forensics (TSK-based, no log2timeline required)
+	AdapterRegistry::register(new DiskTimeline());
+	AdapterRegistry::register(new MftSearch());
+	AdapterRegistry::register(new RegistryParse());
+	AdapterRegistry::register(new PrefetchParse());
+	// Tier 2 — PCAP deep-dive + Office document analysis
+	AdapterRegistry::register(new PcapFilter());
+	AdapterRegistry::register(new PcapCarve());
+	AdapterRegistry::register(new OletoolsAnalyze());
 }
 
 // ── CLI helpers ──────────────────────────────────────────────────

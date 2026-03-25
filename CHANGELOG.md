@@ -7,6 +7,26 @@ Versioning follows a modified SemVer scheme: `<year>-<major>.<minor>.<patch>`.
 
 ---
 
+## [2026-0.4.0] — 2026-03-25
+
+### Added
+
+- **Tier 1 — Disk Image Forensics (E01/Raw) via REMnux** (`src/Adapters/DiskAdapters.php`)
+  - `disk_timeline`: Fast MAC-time filesystem timeline using TSK (fls + mactime). Resolves "What changed on DATE?" directly without `log2timeline`. Can be filtered by `date_filter`.
+  - `mft_search`: Targeted grep-based search across the MFT for locating suspicious files rapidly (e.g., `*.pf`, `mimikatz`).
+  - `registry_parse`: Extraction and structure-aware parsing of SYSTEM, SOFTWARE, SAM, SECURITY, and NTUSER.DAT hives via TSK `icat` and `regripper`.
+  - `prefetch_parse`: Extraction and parsing of Windows Prefetch (`.pf`) items straight from disk images for execution history tracking.
+
+- **Tier 2 — PCAP Deep-Dive & Office Macros via REMnux** (`src/Adapters/REMNuxAdapters.php`)
+  - `pcap_filter`: Sub-filtering of PCAP streams using Wireshark BPF/display filters and custom tshark field extraction.
+  - `pcap_carve`: Automatic TCP stream and transferred-file carving via `tcpflow`, isolating interesting files mapped by magic bytes.
+  - `oletools_analyze`: Extraction of VBA macros, IOCs, and macro risk classification for Office documents (via `olevba` and `mraptor`).
+
+### Fixed
+- Fixed internal wiring where the agent didn't understand how to interface with `w11-dpeterson.E01` — adapters now automatically mount and handle E01 images over virtio shared folders utilizing `mmls` partition offset detection.
+
+---
+
 ## [2026-0.3.2] — 2026-03-25
 
 ### Fixed
@@ -140,6 +160,7 @@ Initial public release. End-to-end DFIR analysis orchestration from a single PHP
 
 ---
 
+[2026-0.4.0]: https://github.com/miksaraj/dfir-copilot/releases/tag/2026-0.4.0
 [2026-0.3.2]: https://github.com/miksaraj/dfir-copilot/releases/tag/2026-0.3.2
 [2026-0.3.1]: https://github.com/miksaraj/dfir-copilot/releases/tag/2026-0.3.1
 [2026-0.3.0]: https://github.com/miksaraj/dfir-copilot/releases/tag/2026-0.3.0

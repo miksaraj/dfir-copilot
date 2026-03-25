@@ -7,6 +7,15 @@ Versioning follows a modified SemVer scheme: `<year>-<major>.<minor>.<patch>`.
 
 ---
 
+## [2026-0.2.0] — 2026-03-25
+
+### Added
+
+- **`reinventory` command** (`dfirbus.php`, `src/Case/Workspace.php`) — rebuilds `inventory.json` from the files that are already present in `raw/`, without copying or moving anything. Useful when evidence zips are extracted in-place after the initial `ingest` run. Re-hashes every file under `raw/` recursively, sorts entries by path for deterministic output, and updates the `ingested_at` timestamp. Only `inventory.json` is modified; no evidence files are touched.
+- **Case Evidence Commands section** (`README.md`) — new reference table covering all case-management CLI commands, plus a dedicated "When to use `reinventory`" subsection with the concrete `unzip` → `reinventory` workflow.
+
+---
+
 ## [2026-0.1.0] — 2026-03-22
 
 Initial public release. End-to-end DFIR analysis orchestration from a single PHP CLI entry point — no Composer, no frameworks.
@@ -73,4 +82,5 @@ Initial public release. End-to-end DFIR analysis orchestration from a single PHP
 
 ---
 
+[2026-0.2.0]: https://github.com/miksaraj/dfir-copilot/releases/tag/2026-0.2.0
 [2026-0.1.0]: https://github.com/miksaraj/dfir-copilot/releases/tag/2026-0.1.0

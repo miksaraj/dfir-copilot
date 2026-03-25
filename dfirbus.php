@@ -69,6 +69,7 @@ Commands:
   init-config                       Generate default config.json
   new-case <case_id>                Create a new case workspace
   ingest <case_id> <path>           Ingest evidence bundle
+  reinventory <case_id>             Rebuild inventory.json from files already in raw/
   run <case_id> <adapter> [args]    Run a specific adapter (args: key=value)
   list-adapters                     List all available adapters
   list-files <case_id>              List raw files in a case
@@ -141,6 +142,19 @@ function cmdIngest(Config $cfg, string $caseId, string $path): void
 		out("  {$name} ({$f['size_bytes']} bytes)");
 	}
 	if ($count > 20) out("  ... and " . ($count - 20) . " more");
+}
+
+function cmdReinventory(Config $cfg, string $caseId): void
+{
+	$case      = new Workspace($cfg->casesRoot, $caseId);
+	$inventory = $case->rebuildInventory();
+	$count     = count($inventory['files']);
+	out("Rebuilt inventory for case '{$caseId}': {$count} file(s) hashed.");
+	foreach (array_slice($inventory['files'], 0, 20) as $f) {
+		out(sprintf("  %-52s %10d B  %s", $f['relative_path'], $f['size_bytes'], substr($f['sha256'], 0, 16) . '...'));
+	}
+	if ($count > 20) out("  ... and " . ($count - 20) . " more");
+	out("Saved to: {$case->inventoryPath}");
 }
 
 function cmdRun(Config $cfg, string $caseId, string $adapterName, array $rawArgs): void
@@ -552,6 +566,7 @@ $cfg = Config::load($configPath);
 match ($command) {
 	'new-case'         => cmdNewCase($cfg, $cleanArgv[2] ?? throw new \InvalidArgumentException('Missing case_id')),
 	'ingest'           => cmdIngest($cfg, $cleanArgv[2] ?? throw new \InvalidArgumentException('Missing case_id'), $cleanArgv[3] ?? throw new \InvalidArgumentException('Missing path')),
+	'reinventory'      => cmdReinventory($cfg, $cleanArgv[2] ?? throw new \InvalidArgumentException('Missing case_id')),
 	'run'              => cmdRun($cfg, $cleanArgv[2] ?? throw new \InvalidArgumentException('Missing case_id'), $cleanArgv[3] ?? throw new \InvalidArgumentException('Missing adapter'), array_slice($cleanArgv, 4)),
 	'list-adapters'    => cmdListAdapters(),
 	'list-files'       => cmdListFiles($cfg, $cleanArgv[2] ?? throw new \InvalidArgumentException('Missing case_id')),

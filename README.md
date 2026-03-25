@@ -197,6 +197,9 @@ php dfirbus.php kb-index
 php dfirbus.php new-case challenge-01
 php dfirbus.php ingest challenge-01 /path/to/challenge/bundle/
 
+# If the bundle contained a zip you extracted manually after ingesting, re-hash:
+php dfirbus.php reinventory challenge-01
+
 # ── Analysis ─────────────────────────────────────────────────
 
 # 9. Run local triage (file IDs, entropy — no VMs needed)
@@ -218,6 +221,33 @@ php dfirbus.php agent-auto challenge-01 "Full analysis and attribution" --max-cy
 # 13. Generate blue-team report
 php dfirbus.php report challenge-01
 ```
+
+## Case Evidence Commands
+
+| Command | Description |
+|---------|-------------|
+| `new-case <id>` | Create the case directory structure |
+| `ingest <id> <path>` | Copy a file or directory into `raw/`, hash everything, write `inventory.json` |
+| `reinventory <id>` | Re-hash all files already in `raw/` and rewrite `inventory.json` |
+| `list-files <id>` | Show all files in `raw/` with sizes |
+| `status <id>` | Print the current case state (IOCs, hypotheses, TTPs) |
+| `ledger <id>` | Show the provenance ledger (tool runs, timestamps, exit codes) |
+| `triage <id>` | Run `file_id` locally on every file in `raw/` |
+| `report <id>` | Generate a blue-team Markdown report |
+
+### When to use `reinventory`
+
+`ingest` hashes files **at copy time**. If you later extract a zip directly inside `raw/` (e.g. `unzip evidence.zip -d cases/challenge-01/raw/evidence/`), the new files won't appear in `inventory.json`. Running `reinventory` fixes this:
+
+```bash
+# Unzip into raw/ yourself
+unzip evidence.zip -d cases/challenge-01/raw/evidence/
+
+# Then rebuild inventory.json in-place (no file copies, just re-hashing)
+php dfirbus.php reinventory challenge-01
+```
+
+Safe to run at any time — only `inventory.json` is modified, no evidence files are touched.
 
 ## Adapters
 

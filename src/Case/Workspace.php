@@ -67,6 +67,44 @@ final class Workspace
 
 	// ── Evidence intake ──────────────────────────────────────────
 
+	/**
+	 * Rebuild inventory.json by re-hashing every file currently in raw/.
+	 * Use this after unzipping evidence in-place without re-running ingest.
+	 *
+	 * @return array The freshly written inventory structure.
+	 */
+	public function rebuildInventory(): array
+	{
+		$files = [];
+
+		if (is_dir($this->rawDir)) {
+			$iter = new \RecursiveIteratorIterator(
+				new \RecursiveDirectoryIterator($this->rawDir, \FilesystemIterator::SKIP_DOTS),
+				\RecursiveIteratorIterator::LEAVES_ONLY
+			);
+
+			foreach ($iter as $file) {
+				/** @var \SplFileInfo $file */
+				$rel     = ltrim(str_replace($this->rawDir, '', $file->getPathname()), '/');
+				$files[] = [
+					'relative_path' => $rel,
+					'sha256'        => hash_file('sha256', $file->getPathname()),
+					'size_bytes'    => $file->getSize(),
+				];
+			}
+
+			usort($files, fn($a, $b) => strcmp($a['relative_path'], $b['relative_path']));
+		}
+
+		$inventory = [
+			'files'        => $files,
+			'ingested_at'  => gmdate('c'),
+		];
+
+		$this->writeJson($this->inventoryPath, $inventory);
+		return $inventory;
+	}
+
 	public function ingestFile(string $sourcePath): array
 	{
 		$name = basename($sourcePath);

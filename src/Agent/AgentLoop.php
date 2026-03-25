@@ -55,6 +55,13 @@ CRITICAL — ANTI-FABRICATION RULES:
 - If knowledge_search returns an error (KB empty), do NOT invent threat intelligence results. State the KB is unavailable.
 - Your analysis must be consistent with the tool calls you actually made. If you made zero tool calls, you have zero new evidence.
 
+KNOWLEDGE BASE UNAVAILABLE — how to handle it:
+- If knowledge_search returns an error ("Knowledge base is empty"), acknowledge this ONCE, then PIVOT.
+- Do NOT keep requesting KB indexing — you cannot run external commands. That is an operator task.
+- Instead, continue with the tools you DO have: extract_iocs, attack_map, log_parse, pcap_summary,
+  strings_and_iocs, file_id, etc. Build the best analysis possible from raw evidence alone.
+- Document the KB limitation as a gap in your final conclusions, not as a blocking dependency.
+
 FILE DISCOVERY — use list_directory first:
 - Before calling file_id, log_parse, extract_iocs, or strings_and_iocs on a file, call list_directory on the parent directory
   to confirm the file exists and learn its exact path.
@@ -103,6 +110,12 @@ EVALUATION RULES:
    adapter results — REJECT immediately. This is fabrication. The analyst invented tool outputs.
    Exception: the analyst may reference tool outputs from PREVIOUS cycles if they explicitly cite them
    as prior findings rather than presenting them as newly run results.
+8. EXTERNAL DEPENDENCY LIMITATION: Do NOT emit required_actions for things the agent cannot do from
+   inside the analysis loop — for example: "index the CTI KB", "run kb-index", "contact the operator",
+   or any external command. The agent cannot satisfy these and the loop will stall.
+   INSTEAD: if a tool is unavailable or KB is empty, APPROVE the analysis if it honestly documents
+   the limitation and uses all other available tools. Add the limitation to 'issues' not
+   'required_actions'.
 
 Respond ONLY with JSON:
 {
@@ -387,6 +400,7 @@ PROMPT;
 			$approved = $cycleResult['judge_verdict']['approved'] ?? false;
 			$required = $cycleResult['judge_verdict']['required_actions'] ?? [];
 			$issues   = $cycleResult['judge_verdict']['issues'] ?? [];
+			$toolsMade = $cycleResult['tool_calls_made'] ?? 0;
 
 			echo "Judge approved: " . ($approved ? 'YES' : 'NO') . "\n";
 
@@ -394,6 +408,30 @@ PROMPT;
 			if ($approved && empty($required)) {
 				echo "\n✓ Analysis complete — judge approved with no outstanding actions.\n";
 				break;
+			}
+
+			// Stall detection: if the same required_actions recur with zero new tool
+			// calls, the agent is blocked on something it cannot resolve (e.g. empty KB,
+			// missing external tool). Break after 2 consecutive stalled cycles rather
+			// than burning the remaining cycle budget repeating the same conclusion.
+			if ($toolsMade === 0 && !empty($required)) {
+				sort($required);
+				$requiredKey = implode('|', $required);
+				if (isset($prevRequiredKey) && $prevRequiredKey === $requiredKey) {
+					$stalledCount = ($stalledCount ?? 0) + 1;
+					if ($stalledCount >= 2) {
+						echo "\n⚠ Stall detected — agent cannot satisfy required actions (zero tool calls for "
+							. ($stalledCount + 1) . " consecutive cycles). Stopping.\n";
+						echo "  Unresolved: " . implode('; ', $required) . "\n";
+						break;
+					}
+				} else {
+					$stalledCount = 0;
+				}
+				$prevRequiredKey = $requiredKey;
+			} else {
+				$stalledCount    = 0;
+				$prevRequiredKey = null;
 			}
 
 			// Approved but still has required_actions: the judge considers the

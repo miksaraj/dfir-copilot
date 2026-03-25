@@ -7,6 +7,20 @@ Versioning follows a modified SemVer scheme: `<year>-<major>.<minor>.<patch>`.
 
 ---
 
+## [2026-0.3.2] — 2026-03-25
+
+### Fixed
+
+- **Agent stalls for the full cycle budget when KB is unavailable** (`src/Agent/AgentLoop.php`) — root cause was threefold:
+
+  1. **Worker prompt** now includes a `KNOWLEDGE BASE UNAVAILABLE` pivot rule: when `knowledge_search` returns an error, acknowledge it once and continue with the remaining tools (`extract_iocs`, `attack_map`, `pcap_summary`, etc.). Do not keep requesting `kb-index` — that is an operator task the agent cannot execute from inside the loop.
+
+  2. **Judge prompt** gets Rule 8: do not emit `required_actions` for external dependencies the agent cannot satisfy (KB indexing, external CLI commands, operator contact). If a tool is unavailable and the analysis honestly documents the limitation and uses all other available tools, approve and move the limitation to `issues` instead.
+
+  3. **`runAuto` stall detection**: if `required_actions` are identical to the previous cycle and `tool_calls_made = 0` for 2+ consecutive cycles, the loop detects an unresolvable stall, prints a `⚠ Stall detected` warning with the unresolved actions, and breaks early instead of burning the remaining cycle budget repeating the same blocked conclusion.
+
+---
+
 ## [2026-0.3.1] — 2026-03-25
 
 ### Fixed
@@ -126,6 +140,7 @@ Initial public release. End-to-end DFIR analysis orchestration from a single PHP
 
 ---
 
+[2026-0.3.2]: https://github.com/miksaraj/dfir-copilot/releases/tag/2026-0.3.2
 [2026-0.3.1]: https://github.com/miksaraj/dfir-copilot/releases/tag/2026-0.3.1
 [2026-0.3.0]: https://github.com/miksaraj/dfir-copilot/releases/tag/2026-0.3.0
 [2026-0.2.2]: https://github.com/miksaraj/dfir-copilot/releases/tag/2026-0.2.2

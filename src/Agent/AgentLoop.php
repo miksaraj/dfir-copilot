@@ -316,7 +316,14 @@ PROMPT;
 	}
 
 	/**
-	 * Auto-pilot loop: worker → judge → repeat until approved or max cycles.
+	 * Auto-pilot loop: worker → judge → repeat until the judge approves with
+	 * no remaining required_actions, or until max cycles is reached.
+	 *
+	 * WHY: The judge may approve an early cycle as "honest so far" while still
+	 * listing required_actions (e.g. "run strings_and_iocs", "verify evidence.zip").
+	 * Stopping on the first approval would abandon the investigation mid-flight.
+	 * The loop only truly terminates when approved === true AND required_actions
+	 * is empty — meaning the judge considers the work genuinely complete.
 	 */
 	public function runAuto(string $initialInstruction = '', ?int $maxCycles = null): array
 	{
@@ -334,16 +341,30 @@ PROMPT;
 			$results[]            = $cycleResult;
 
 			echo "\nWorker: " . mb_substr($cycleResult['worker_analysis'], 0, 500) . "...\n";
-			echo "Judge approved: " . ($cycleResult['judge_verdict']['approved'] ?? false ? 'YES' : 'NO') . "\n";
 
-			if ($cycleResult['judge_verdict']['approved'] ?? false) {
-				echo "\n✓ Judge approved the analysis.\n";
-				break;
-			}
-
+			$approved = $cycleResult['judge_verdict']['approved'] ?? false;
 			$required = $cycleResult['judge_verdict']['required_actions'] ?? [];
 			$issues   = $cycleResult['judge_verdict']['issues'] ?? [];
 
+			echo "Judge approved: " . ($approved ? 'YES' : 'NO') . "\n";
+
+			// Genuinely done: approved with nothing left to do.
+			if ($approved && empty($required)) {
+				echo "\n✓ Analysis complete — judge approved with no outstanding actions.\n";
+				break;
+			}
+
+			// Approved but still has required_actions: the judge considers the
+			// current work honest but wants more. Continue with those actions.
+			if ($approved && !empty($required)) {
+				echo "  (approved but " . count($required) . " required action(s) remain — continuing)\n";
+				$instruction = "The judge approved your analysis so far but requires these additional steps:\n"
+					. implode("\n", array_map(fn($a) => "- {$a}", $required))
+					. "\n\nComplete these steps before concluding.";
+				continue;
+			}
+
+			// Rejected: feed back required actions or issues.
 			if (!empty($required)) {
 				$instruction = "The judge rejected your analysis. Required actions:\n"
 					. implode("\n", array_map(fn($a) => "- {$a}", $required))

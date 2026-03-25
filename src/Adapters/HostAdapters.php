@@ -227,6 +227,12 @@ final class ExtractIOCs extends BaseAdapter
 			return $this->errorResult("File not found: {$fp}");
 		}
 
+		$size = filesize($fp);
+		if ($size > 150 * 1024 * 1024) {
+			$mb = round($size / 1024 / 1024);
+			return $this->errorResult("File too large for extract_iocs: {$mb} MB. Limit is 150 MB. Use grep or strings for larger files.");
+		}
+
 		$iocs = [
 			'ips' => [], 'domains' => [], 'urls' => [], 'emails' => [],
 			'md5s' => [], 'sha1s' => [], 'sha256s' => [],

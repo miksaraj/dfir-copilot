@@ -49,6 +49,18 @@ final class StringsAndIOCs extends BaseAdapter
 
 		if (!file_exists($fp)) return $this->errorResult("File not found: {$fp}");
 
+		$ext = strtolower(pathinfo($fp, PATHINFO_EXTENSION));
+		// E01, Raw images are notoriously large and will hang strings
+		if (in_array($ext, ['e01', 'ex01', 'raw', 'dd', 'img', 'vmdk'], true)) {
+			return $this->errorResult("strings_and_iocs cannot be run directly on disk images ({$ext}). Use disk_timeline or mft_search instead.");
+		}
+		
+		$size = filesize($fp);
+		if ($size > 500 * 1024 * 1024) {
+			$mb = round($size / 1024 / 1024);
+			return $this->errorResult("File too large for strings_and_iocs: {$mb} MB. Limit is 500 MB to prevent timeouts.");
+		}
+
 		$ssh       = remnux_ssh($config);
 		$remoteDir = $config->remnuxWorkDir;
 
@@ -117,6 +129,17 @@ final class YARAScan extends BaseAdapter
 		$rule = $params['rules_name'] ?? 'all';
 
 		if (!file_exists($fp)) return $this->errorResult("File not found: {$fp}");
+
+		$ext = strtolower(pathinfo($fp, PATHINFO_EXTENSION));
+		if (in_array($ext, ['e01', 'ex01', 'raw', 'dd', 'img', 'vmdk'], true)) {
+			return $this->errorResult("yara_scan cannot be run directly on disk images ({$ext}). Extract files first (e.g. via mft_search), then scan them.");
+		}
+		
+		$size = filesize($fp);
+		if ($size > 1024 * 1024 * 1024) {
+			$mb = round($size / 1024 / 1024);
+			return $this->errorResult("File too large for yara_scan: {$mb} MB. Limit is 1 GB mapped to prevent timeouts.");
+		}
 
 		$ssh       = remnux_ssh($config);
 		$remoteDir = $config->remnuxWorkDir;

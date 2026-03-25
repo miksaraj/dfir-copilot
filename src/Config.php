@@ -34,7 +34,7 @@ final class Config
 	public string $ollamaWorkerModel = 'qwen3:8b';
 	public string $ollamaJudgeModel = 'qwen3:8b';
 	public float $ollamaTemperature = 0.1;
-	public int $ollamaTimeout = 120;
+	public int $ollamaTimeout = 600;
 
 	// Ollama advanced
 	public string $ollamaKvCacheType = 'q8_0';
@@ -184,7 +184,7 @@ final class Config
 				'worker_model' => 'qwen3:8b',
 				'judge_model' => 'qwen3:8b',
 				'temperature' => 0.1,
-				'timeout' => 120,
+				'timeout' => 300,
 				'kv_cache_type' => 'q8_0',
 				'context_length' => 8192,
 				'worker_thinking' => true,

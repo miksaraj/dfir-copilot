@@ -7,6 +7,14 @@ Versioning follows a modified SemVer scheme: `<year>-<major>.<minor>.<patch>`.
 
 ---
 
+## [2026-0.2.2] — 2026-03-25
+
+### Fixed
+
+- **Ollama request timeout too short** (`src/Config.php`) — the default `ollama.timeout` was 120 s, which is reliably too short for qwen3:8b in thinking mode. With `worker_thinking: true` the model can spend 2–3 minutes on a single complex reasoning step, and the timeout is per-request against an accumulated conversation history that grows each cycle. Raised to 600 s. The `generateDefault()` template is updated to match. Existing `config.json` files must be updated manually: change `"timeout": 120` to `"timeout": 600`. Documented in README with a callout note in the Configuration section.
+
+---
+
 ## [2026-0.2.1] — 2026-03-25
 
 ### Fixed
@@ -90,6 +98,7 @@ Initial public release. End-to-end DFIR analysis orchestration from a single PHP
 
 ---
 
+[2026-0.2.2]: https://github.com/miksaraj/dfir-copilot/releases/tag/2026-0.2.2
 [2026-0.2.1]: https://github.com/miksaraj/dfir-copilot/releases/tag/2026-0.2.1
 [2026-0.2.0]: https://github.com/miksaraj/dfir-copilot/releases/tag/2026-0.2.0
 [2026-0.1.0]: https://github.com/miksaraj/dfir-copilot/releases/tag/2026-0.1.0

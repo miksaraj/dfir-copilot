@@ -208,6 +208,8 @@ Initial public release. End-to-end DFIR analysis orchestration from a single PHP
 
 ---
 
+[2026-0.6.0]: https://github.com/miksaraj/dfir-copilot/releases/tag/v2026-0.6.0
+[2026-0.5.0]: https://github.com/miksaraj/dfir-copilot/releases/tag/v2026-0.5.0
 [2026-0.4.3]: https://github.com/miksaraj/dfir-copilot/releases/tag/2026-0.4.3
 [2026-0.4.2]: https://github.com/miksaraj/dfir-copilot/releases/tag/2026-0.4.2
 [2026-0.4.1]: https://github.com/miksaraj/dfir-copilot/releases/tag/2026-0.4.1

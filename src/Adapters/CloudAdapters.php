@@ -693,3 +693,281 @@ final class GhSecurityLog extends BaseAdapter
 		);
 	}
 }
+
+// ─────────────────────────────────────────────────────────────────
+// s3_access_log_query
+// ─────────────────────────────────────────────────────────────────
+
+/**
+ * Queries a directory of S3/ObjectVault server access log files in bulk.
+ *
+ * S3 access logs use a fixed space-delimited format (AWS Combined Log Format):
+ *   bucket-owner bucket [datetime] ip requesterId requestId operation key
+ *   "request-uri" status errorCode bytesSent objectSize totalTime ... userAgent ...
+ *
+ * Relevant for: S3 data exfiltration, ObjectVault access investigation,
+ * attacker IP enumeration, PUT/GET of specific keys, user-agent fingerprinting.
+ */
+final class S3AccessLogQuery extends BaseAdapter
+{
+	public const NAME        = 's3_access_log_query';
+	public const VERSION     = '1.0.0';
+	public const DESCRIPTION = 'Query a directory of S3 / ObjectVault server access log files in bulk. Filters across all files by source IP, HTTP method (GET/PUT/DELETE etc.), object key prefix, HTTP status code, or operation type. Returns parsed structured entries with bucket, key, user-agent, status, and bytes. Eliminates the need to run log_parse on each file individually.';
+	public const TARGET      = 'local';
+
+	/** S3 access log field positions (0-indexed, space-split with quoted fields handled) */
+	private const F_BUCKET    = 1;
+	private const F_DATETIME  = 2; // [dd/Mon/YYYY:HH:MM:SS +0000]
+	private const F_IP        = 4;
+	private const F_OPERATION = 7;
+	private const F_KEY       = 8;
+	private const F_REQUEST   = 9; // "METHOD /path HTTP/x"
+	private const F_STATUS    = 10;
+	private const F_ERROR     = 11;
+	private const F_BYTES     = 12;
+	private const F_UA        = 19; // approximate; may shift with extended fields
+
+	public function getToolSchema(): array
+	{
+		return [
+			'name'        => self::NAME,
+			'description' => self::DESCRIPTION,
+			'parameters'  => [
+				'type'       => 'object',
+				'properties' => [
+					'log_dir' => [
+						'type'        => 'string',
+						'description' => 'Path to the directory containing S3 access log files (relative to case dir). All files in this directory are scanned (non-recursive by default).',
+					],
+					'source_ip' => [
+						'type'        => 'string',
+						'description' => 'Filter: only return entries from this source IP.',
+					],
+					'method' => [
+						'type'        => 'string',
+						'description' => 'Filter: HTTP method to match (e.g. "PUT", "GET", "DELETE"). Case-insensitive.',
+					],
+					'operation' => [
+						'type'        => 'string',
+						'description' => 'Filter: S3 operation to match (e.g. "REST.PUT.OBJECT", "REST.GET.OBJECT"). Substring match.',
+					],
+					'key_prefix' => [
+						'type'        => 'string',
+						'description' => 'Filter: only return entries where the object key starts with this prefix.',
+					],
+					'status_code' => [
+						'type'        => 'integer',
+						'description' => 'Filter: only return entries with this HTTP status code (e.g. 200, 403, 404).',
+					],
+					'exclude_ips' => [
+						'type'        => 'array',
+						'items'       => ['type' => 'string'],
+						'description' => 'Exclude entries from these IP addresses (e.g. known CDN edge IPs).',
+					],
+					'max_entries' => [
+						'type'        => 'integer',
+						'description' => 'Maximum entries to return (default: 300).',
+						'default'     => 300,
+					],
+					'recursive' => [
+						'type'        => 'boolean',
+						'description' => 'If true, search log files recursively in subdirectories. Default false.',
+						'default'     => false,
+					],
+				],
+				'required' => ['log_dir'],
+			],
+		];
+	}
+
+	/** Parse one S3 access log line into an array of fields, handling quoted segments. */
+	private function parseLine(string $line): array
+	{
+		$fields = [];
+		$len    = strlen($line);
+		$i      = 0;
+
+		while ($i < $len) {
+			// Skip leading spaces
+			while ($i < $len && $line[$i] === ' ') $i++;
+			if ($i >= $len) break;
+
+			if ($line[$i] === '"') {
+				// Quoted field
+				$i++;
+				$start = $i;
+				while ($i < $len && $line[$i] !== '"') $i++;
+				$fields[] = substr($line, $start, $i - $start);
+				$i++; // skip closing "
+			} elseif ($line[$i] === '[') {
+				// Bracketed field (datetime)
+				$i++;
+				$start = $i;
+				while ($i < $len && $line[$i] !== ']') $i++;
+				$fields[] = substr($line, $start, $i - $start);
+				$i++; // skip ]
+			} else {
+				$start = $i;
+				while ($i < $len && $line[$i] !== ' ') $i++;
+				$fields[] = substr($line, $start, $i - $start);
+			}
+		}
+
+		return $fields;
+	}
+
+	protected function execute(Workspace $case, Config $config, array $params): AdapterResult
+	{
+		$logRel     = $this->requireParam($params, 'log_dir');
+		$logAbs     = $this->resolveFilePath($case, $logRel);
+		$sourceIp   = $params['source_ip'] ?? '';
+		$method     = strtoupper($params['method'] ?? '');
+		$operation  = strtoupper($params['operation'] ?? '');
+		$keyPrefix  = $params['key_prefix'] ?? '';
+		$statusCode = isset($params['status_code']) ? (int) $params['status_code'] : null;
+		$excludeIps = $params['exclude_ips'] ?? [];
+		$maxEntries = (int) ($params['max_entries'] ?? 300);
+		$recursive  = (bool) ($params['recursive'] ?? false);
+
+		if (!is_dir($logAbs)) {
+			return $this->errorResult("Log directory not found: {$logRel}");
+		}
+
+		// Enumerate files
+		$files = [];
+		if ($recursive) {
+			$iter = new \RecursiveIteratorIterator(
+				new \RecursiveDirectoryIterator($logAbs, \FilesystemIterator::SKIP_DOTS),
+				\RecursiveIteratorIterator::LEAVES_ONLY
+			);
+			foreach ($iter as $f) {
+				/** @var \SplFileInfo $f */
+				if ($f->isFile()) $files[] = $f->getPathname();
+			}
+		} else {
+			foreach (scandir($logAbs) ?: [] as $fn) {
+				if ($fn === '.' || $fn === '..') continue;
+				$full = "{$logAbs}/{$fn}";
+				if (is_file($full)) $files[] = $full;
+			}
+		}
+		sort($files);
+
+		$entries     = [];
+		$filesScanned = 0;
+		$totalLines  = 0;
+		$ipCounts    = [];
+		$opCounts    = [];
+		$statusCounts = [];
+
+		foreach ($files as $file) {
+			$lines = file($file, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
+			if ($lines === false) continue;
+			$filesScanned++;
+
+			foreach ($lines as $line) {
+				$totalLines++;
+				$f = $this->parseLine($line);
+				if (count($f) < 12) continue;
+
+				$entryIp  = $f[self::F_IP]        ?? '-';
+				$entryOp  = $f[self::F_OPERATION]  ?? '-';
+				$entryKey = $f[self::F_KEY]        ?? '-';
+				$entryReq = $f[self::F_REQUEST]    ?? '-';
+				$entrySt  = (int) ($f[self::F_STATUS] ?? 0);
+				$entryUa  = $f[self::F_UA]         ?? '-';
+				$entryDt  = $f[self::F_DATETIME]   ?? '-';
+				$entryBytes = $f[self::F_BYTES]    ?? '-';
+
+				// Derive method from request string "GET /key HTTP/1.1"
+				$entryMethod = strtoupper(explode(' ', $entryReq)[0] ?? '');
+
+				// Aggregates
+				$ipCounts[$entryIp]       = ($ipCounts[$entryIp] ?? 0) + 1;
+				$opCounts[$entryOp]       = ($opCounts[$entryOp] ?? 0) + 1;
+				$statusCounts[$entrySt]   = ($statusCounts[$entrySt] ?? 0) + 1;
+
+				// Filters
+				if ($sourceIp !== '' && $entryIp !== $sourceIp) continue;
+				if (!empty($excludeIps) && in_array($entryIp, $excludeIps, true)) continue;
+				if ($method !== '' && $entryMethod !== $method) continue;
+				if ($operation !== '' && !str_contains($entryOp, $operation)) continue;
+				if ($keyPrefix !== '' && !str_starts_with($entryKey, $keyPrefix)) continue;
+				if ($statusCode !== null && $entrySt !== $statusCode) continue;
+
+				$entries[] = [
+					'datetime'   => $entryDt,
+					'ip'         => $entryIp,
+					'operation'  => $entryOp,
+					'key'        => $entryKey,
+					'method'     => $entryMethod,
+					'status'     => $entrySt,
+					'bytes'      => $entryBytes,
+					'user_agent' => $entryUa,
+					'source_file' => basename($file),
+				];
+
+				if (count($entries) >= $maxEntries * 2) break;
+			}
+		}
+
+		$entries = array_slice($entries, 0, $maxEntries);
+
+		arsort($ipCounts);
+		arsort($opCounts);
+		arsort($statusCounts);
+
+		// Unique user agents from matched entries
+		$uniqueUAs = array_unique(array_filter(array_column($entries, 'user_agent'), fn($ua) => $ua !== '-'));
+
+		$outPath = "{$case->derivedDir}/s3_access_log_query_" . time() . '.json';
+		$this->writeJson($outPath, [
+			'query'   => array_filter(compact('sourceIp', 'method', 'operation', 'keyPrefix', 'statusCode')),
+			'stats'   => [
+				'files_scanned'   => $filesScanned,
+				'total_lines'     => $totalLines,
+				'matched_entries' => count($entries),
+			],
+			'summary' => [
+				'top_source_ips'  => array_slice($ipCounts, 0, 10, true),
+				'operation_counts' => array_slice($opCounts, 0, 10, true),
+				'status_counts'   => $statusCounts,
+				'unique_user_agents' => array_values($uniqueUAs),
+			],
+			'entries' => $entries,
+		]);
+
+		$evidence = [];
+		foreach (array_slice(array_keys($ipCounts), 0, 5) as $ip) {
+			$evidence[] = "s3_access:ip={$ip}:count={$ipCounts[$ip]}";
+		}
+		foreach (array_values($uniqueUAs) as $ua) {
+			$evidence[] = "s3_access:ua=" . substr($ua, 0, 80);
+		}
+
+		$summary = "S3 Access Logs: {$filesScanned} files, {$totalLines} lines → " . count($entries) . " matched";
+		if ($sourceIp)   $summary .= " [ip={$sourceIp}]";
+		if ($method)     $summary .= " [method={$method}]";
+		if ($statusCode) $summary .= " [status={$statusCode}]";
+
+		return new AdapterResult(
+			adapterName:       self::NAME,
+			success:           true,
+			producedFiles:     [$outPath],
+			structuredResults: [
+				'files_scanned'      => $filesScanned,
+				'total_lines'        => $totalLines,
+				'matched_entries'    => count($entries),
+				'top_source_ips'     => array_slice($ipCounts, 0, 10, true),
+				'operation_counts'   => array_slice($opCounts, 0, 10, true),
+				'status_counts'      => $statusCounts,
+				'unique_user_agents' => array_values($uniqueUAs),
+				'entries'            => array_slice($entries, 0, 40),
+			],
+			evidencePointers:  $evidence,
+			stdoutExcerpt:     $summary,
+			stderrExcerpt:     '',
+			execResult:        new ExecResult(0, '', '', 0, 'local', 's3_access_log_query'),
+		);
+	}
+}

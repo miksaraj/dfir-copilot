@@ -273,6 +273,7 @@ Safe to run at any time — only `inventory.json` is modified, no evidence files
 | `gzipped_log_parse` | local | Parse gzip-compressed log files (`.gz`, `.log.gz`) transparently — Nexus request/audit logs, rotated syslogs |
 | `cloudtrail_query` | local | Query AWS CloudTrail gzip-JSON logs across regions and dates; filter by source IP, access key, event name, service, error code |
 | `gh_security_log` | local | Parse GitHub Security Audit Log JSON — epoch-ms timestamps, action/actor/IP filters, auto-flags high-risk events (MFA bypass, unrecognized login, OAuth token creation) |
+| `s3_access_log_query` | local | Query a directory of S3 / ObjectVault server access log files in bulk; filter by source IP, HTTP method, object key prefix, operation type, or status code — eliminates per-file `log_parse` overhead |
 
 ### REMnux (SSH)
 

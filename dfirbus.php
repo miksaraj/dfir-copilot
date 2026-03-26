@@ -19,7 +19,7 @@ use DFIRCopilot\Rag\KnowledgeBase;
 use DFIRCopilot\Adapters\{InjectPdfRead, EvtxParse, LogParse, ListDirectory, DecryptZip};
 use DFIRCopilot\Adapters\{DiskTimeline, MftSearch, RegistryParse, PrefetchParse};
 use DFIRCopilot\Adapters\{PcapFilter, PcapCarve, OletoolsAnalyze};
-use DFIRCopilot\Adapters\{GzippedLogParse, CloudTrailQuery, GhSecurityLog};
+use DFIRCopilot\Adapters\{GzippedLogParse, CloudTrailQuery, GhSecurityLog, S3AccessLogQuery};
 
 // ── Adapter registration ─────────────────────────────────────────
 
@@ -56,6 +56,7 @@ function registerAllAdapters(): void
 	AdapterRegistry::register(new GzippedLogParse());
 	AdapterRegistry::register(new CloudTrailQuery());
 	AdapterRegistry::register(new GhSecurityLog());
+	AdapterRegistry::register(new S3AccessLogQuery());
 }
 
 // ── CLI helpers ──────────────────────────────────────────────────

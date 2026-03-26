@@ -7,6 +7,14 @@ Versioning follows a modified SemVer scheme: `<year>-<major>.<minor>.<patch>`.
 
 ---
 
+## [2026-0.6.0] — 2026-03-26
+
+### Added
+
+- **`s3_access_log_query`** (`CloudAdapters.php`) — Queries a directory of S3 / ObjectVault server access log files in bulk. Parses the fixed-width S3 Combined Log Format (handling quoted and bracketed fields correctly), filters by `source_ip`, HTTP `method`, S3 `operation`, `key_prefix`, and `status_code`. Returns per-entry structured data (datetime, IP, operation, key, method, status, bytes, user-agent) plus IP/operation/status frequency summaries. Supports both flat and recursive directory layouts. Eliminates the need to run `log_parse` against each rotated log file individually — critical for S3/ObjectVault access investigations like for_300 ObjectVault exfiltration tracing.
+
+---
+
 ## [2026-0.5.0] — 2026-03-26
 
 ### Added

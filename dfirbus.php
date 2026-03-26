@@ -19,6 +19,7 @@ use DFIRCopilot\Rag\KnowledgeBase;
 use DFIRCopilot\Adapters\{InjectPdfRead, EvtxParse, LogParse, ListDirectory, DecryptZip};
 use DFIRCopilot\Adapters\{DiskTimeline, MftSearch, RegistryParse, PrefetchParse};
 use DFIRCopilot\Adapters\{PcapFilter, PcapCarve, OletoolsAnalyze};
+use DFIRCopilot\Adapters\{GzippedLogParse, CloudTrailQuery, GhSecurityLog};
 
 // ── Adapter registration ─────────────────────────────────────────
 
@@ -51,6 +52,10 @@ function registerAllAdapters(): void
 	AdapterRegistry::register(new PcapFilter());
 	AdapterRegistry::register(new PcapCarve());
 	AdapterRegistry::register(new OletoolsAnalyze());
+	// Tier 3 — Cloud & gzipped log forensics
+	AdapterRegistry::register(new GzippedLogParse());
+	AdapterRegistry::register(new CloudTrailQuery());
+	AdapterRegistry::register(new GhSecurityLog());
 }
 
 // ── CLI helpers ──────────────────────────────────────────────────

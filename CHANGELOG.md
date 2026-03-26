@@ -7,6 +7,22 @@ Versioning follows a modified SemVer scheme: `<year>-<major>.<minor>.<patch>`.
 
 ---
 
+## [2026-0.5.0] — 2026-03-26
+
+### Added
+
+- **Tier 3 — Cloud & Log Forensics** (`src/Adapters/CloudAdapters.php`)
+  - `gzipped_log_parse` — Transparent gzip decompression before log parsing. Handles `.gz` / `.log.gz` files (Nexus rotated request/audit logs, syslog.gz). Adds CLF format detection and HTTP method frequency analysis on top of `log_parse`. Same interface as `log_parse` — drop-in replacement for compressed evidence.
+  - `cloudtrail_query` — Walks an AWS CloudTrail S3-export directory tree (any depth, any region), decompresses `.json.gz` files, and filters events by `source_ip`, `access_key_id`, `event_name`, `event_source`, date range, and success/error status. Scans hundreds of thousands of records in seconds. Returns unique IP, key, and event-name summaries alongside matched events.
+  - `gh_security_log` — Parses GitHub Security Audit Log JSON exports. Converts epoch-millisecond `@timestamp` to ISO-8601, filters by action/actor/IP/time range, and auto-flags 12 pre-defined high-risk event types including `user.login`, `user.sign_in_from_unrecognized_device_and_location`, `user.two_factor_challenge_failure`, `oauth_access.create`, and `repo.destroy`.
+
+### Changed
+
+- **`decrypt_zip` v1.1.0** — Added `recursive` boolean parameter. When `true`, any `.zip` files extracted from the outer archive are themselves extracted (ZIP-in-ZIP). Required for GitHub Actions log bundles where each job produces a nested zip. The `extractZip()` logic was factored into a private helper to support recursion cleanly.
+- **README** — Adapter table restructured into four tiers: Core/Local, Cloud & Log Forensics, REMnux, Disk Image (TSK), and FLARE-VM. All previously undocumented adapters (`list_directory`, `decrypt_zip`, `pcap_filter`, `pcap_carve`, `oletools_analyze`, `disk_timeline`, `mft_search`, `registry_parse`, `prefetch_parse`) are now listed.
+
+---
+
 ## [2026-0.4.3] — 2026-03-25
 
 ### Added

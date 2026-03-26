@@ -873,8 +873,8 @@ final class ListDirectory extends BaseAdapter
 final class DecryptZip extends BaseAdapter
 {
 	public const NAME        = 'decrypt_zip';
-	public const VERSION     = '1.0.0';
-	public const DESCRIPTION = 'Extract a ZIP archive (optionally password-protected) into a directory inside the case workspace. Use this when the inject PDF provides a password for an evidence ZIP that has not yet been extracted.';
+	public const VERSION     = '1.1.0';
+	public const DESCRIPTION = 'Extract a ZIP archive (optionally password-protected) into a directory inside the case workspace. Supports recursive extraction (ZIP-in-ZIP) for nested evidence bundles such as GitHub Actions log archives. Use this when the inject PDF provides a password for an evidence ZIP that has not yet been extracted.';
 	public const TARGET      = 'local';
 
 	public function getToolSchema(): array
@@ -898,18 +898,55 @@ final class DecryptZip extends BaseAdapter
 						'description' => 'ZIP password (if the archive is password-protected). Leave empty for plain ZIPs.',
 						'default'     => '',
 					],
+					'recursive' => [
+						'type'        => 'boolean',
+						'description' => 'If true, recursively extract any .zip files found inside the archive (ZIP-in-ZIP). Useful for GitHub Actions log bundles where each job log is a nested zip. Default false.',
+						'default'     => false,
+					],
 				],
 				'required' => ['zip_path', 'dest_path'],
 			],
 		];
 	}
 
+	/** Extract one ZIP into $destPath, return [extracted_count, failed_names[]] */
+	private function extractZip(string $zipPath, string $destPath, string $password): array
+	{
+		$zip = new \ZipArchive();
+		$res = $zip->open($zipPath);
+		if ($res !== true) {
+			return [0, ["Cannot open ZIP: error {$res}"]];
+		}
+		if ($password !== '') {
+			$zip->setPassword($password);
+		}
+		if (!is_dir($destPath)) {
+			mkdir($destPath, 0755, true);
+		}
+		$extracted = 0;
+		$failed    = [];
+		for ($i = 0; $i < $zip->numFiles; $i++) {
+			$name = $zip->getNameIndex($i);
+			if ($name === false || str_ends_with($name, '/')) continue;
+			$target = rtrim($destPath, '/') . '/' . $name;
+			$dir    = dirname($target);
+			if (!is_dir($dir)) mkdir($dir, 0755, true);
+			$content = $zip->getFromIndex($i);
+			if ($content === false) { $failed[] = $name; continue; }
+			file_put_contents($target, $content);
+			$extracted++;
+		}
+		$zip->close();
+		return [$extracted, $failed];
+	}
+
 	protected function execute(Workspace $case, Config $config, array $params): AdapterResult
 	{
-		$zipPath  = $this->resolveFilePath($case, $this->requireParam($params, 'zip_path'));
-		$destRel  = $this->requireParam($params, 'dest_path');
-		$destPath = $this->resolveFilePath($case, $destRel);
-		$password = $params['password'] ?? '';
+		$zipPath   = $this->resolveFilePath($case, $this->requireParam($params, 'zip_path'));
+		$destRel   = $this->requireParam($params, 'dest_path');
+		$destPath  = $this->resolveFilePath($case, $destRel);
+		$password  = $params['password'] ?? '';
+		$recursive = (bool) ($params['recursive'] ?? false);
 
 		if (!file_exists($zipPath)) {
 			return $this->errorResult("ZIP not found: {$zipPath}");
@@ -919,70 +956,41 @@ final class DecryptZip extends BaseAdapter
 			return $this->errorResult("PHP ZipArchive extension is not available on this system.");
 		}
 
-		if (!is_dir($destPath)) {
-			mkdir($destPath, 0755, true);
-		}
-
-		$zip = new \ZipArchive();
-		$res = $zip->open($zipPath);
-		if ($res !== true) {
-			$codes = [
-				\ZipArchive::ER_NOZIP   => 'not a ZIP archive',
-				\ZipArchive::ER_INCONS  => 'archive is inconsistent',
-				\ZipArchive::ER_MEMORY  => 'malloc failure',
-				\ZipArchive::ER_NOENT   => 'file not found',
-				\ZipArchive::ER_OPEN    => 'cannot open file',
-			];
-			return $this->errorResult("Failed to open ZIP ({$zipPath}): " . ($codes[$res] ?? "error code {$res}"));
-		}
-
-		if ($password !== '') {
-			$zip->setPassword($password);
-		}
-
-		$extracted = 0;
-		$failed    = [];
-
-		for ($i = 0; $i < $zip->numFiles; $i++) {
-			$name = $zip->getNameIndex($i);
-			if ($name === false) continue;
-
-			$target = rtrim($destPath, '/') . '/' . $name;
-
-			// Create parent directories
-			$dir = dirname($target);
-			if (!is_dir($dir)) {
-				mkdir($dir, 0755, true);
-			}
-
-			// Skip directory entries
-			if (str_ends_with($name, '/')) {
-				continue;
-			}
-
-			$content = $zip->getFromIndex($i);
-			if ($content === false) {
-				$failed[] = $name;
-				continue;
-			}
-
-			file_put_contents($target, $content);
-			$extracted++;
-		}
-
-		$zip->close();
+		// First-level extraction
+		[$extracted, $failed] = $this->extractZip($zipPath, $destPath, $password);
 
 		if ($extracted === 0 && !empty($failed)) {
 			return $this->errorResult(
-				"Extraction failed for all {$zip->numFiles} files. " .
+				"Extraction failed for all files. " .
 				($password !== '' ? "Password may be incorrect. " : '') .
 				"Failed entries: " . implode(', ', array_slice($failed, 0, 10))
 			);
 		}
 
+		// Recursive: re-extract any nested .zip files found in the destination
+		$nestedExtracted = 0;
+		$nestedZips      = [];
+		if ($recursive) {
+			$iter = new \RecursiveIteratorIterator(
+				new \RecursiveDirectoryIterator($destPath, \FilesystemIterator::SKIP_DOTS),
+				\RecursiveIteratorIterator::LEAVES_ONLY
+			);
+			foreach ($iter as $found) {
+				/** @var \SplFileInfo $found */
+				if (!str_ends_with(strtolower($found->getFilename()), '.zip')) continue;
+				$nestedDest = $found->getPath() . '/' . pathinfo($found->getFilename(), PATHINFO_FILENAME);
+				[$n, ] = $this->extractZip($found->getPathname(), $nestedDest, $password);
+				$nestedExtracted += $n;
+				$nestedZips[]     = $found->getFilename();
+			}
+		}
+
 		$summary = "Extracted {$extracted} file(s) to {$destRel}";
+		if ($nestedExtracted > 0) {
+			$summary .= " + {$nestedExtracted} from " . count($nestedZips) . " nested ZIP(s)";
+		}
 		if (!empty($failed)) {
-			$summary .= " ({" . count($failed) . "} failed: " . implode(', ', array_slice($failed, 0, 5)) . ")";
+			$summary .= " (" . count($failed) . " failed: " . implode(', ', array_slice($failed, 0, 5)) . ")";
 		}
 
 		return new AdapterResult(
@@ -990,13 +998,15 @@ final class DecryptZip extends BaseAdapter
 			success:           true,
 			producedFiles:     [$destPath],
 			structuredResults: [
-				'zip_path'   => $zipPath,
-				'dest_path'  => $destPath,
-				'extracted'  => $extracted,
-				'failed'     => $failed,
-				'next_step'  => "Run list_directory on \"{$destRel}\" to see the extracted files, then analyse them.",
+				'zip_path'        => $zipPath,
+				'dest_path'       => $destPath,
+				'extracted'       => $extracted,
+				'failed'          => $failed,
+				'nested_zips'     => $nestedZips,
+				'nested_extracted' => $nestedExtracted,
+				'next_step'       => "Run list_directory on \"{$destRel}\" to see the extracted files, then analyse them.",
 			],
-			evidencePointers:  ["decrypt_zip:{$destRel}:extracted={$extracted}"],
+			evidencePointers:  ["decrypt_zip:{$destRel}:extracted=" . ($extracted + $nestedExtracted)],
 			stdoutExcerpt:     $summary,
 			stderrExcerpt:     empty($failed) ? '' : count($failed) . ' files failed to extract',
 			execResult:        new ExecResult(0, '', '', 0, 'local', "decrypt_zip " . basename($zipPath)),

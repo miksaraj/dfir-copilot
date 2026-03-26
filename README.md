@@ -251,23 +251,57 @@ Safe to run at any time — only `inventory.json` is modified, no evidence files
 
 ## Adapters
 
+### Core / Local
+
 | Adapter | Target | Description |
 |---------|--------|-------------|
 | `intake_bundle` | local | Ingest + hash evidence |
 | `file_id` | local | File type, hashes, entropy |
 | `extract_iocs` | local | Parse IOCs from text files |
+| `log_parse` | local | Parse log files (syslog, JSON lines, CSV) with keyword/regex filter |
+| `list_directory` | local | Browse evidence directory tree |
+| `decrypt_zip` | local | Extract plain or password-protected ZIPs; supports recursive ZIP-in-ZIP (e.g. GitHub Actions log bundles) |
 | `attack_map` | local | Map observations → ATT&CK |
 | `actor_rank` | local | Rank actors from scenario CTI |
 | `knowledge_search` | local | Search scenario CTI knowledge base (RAG) |
-| `log_parse` | local | Parse log files (syslog, JSON lines, CSV) with keyword/regex filter |
-| `strings_and_iocs` | remnux | Extract strings via SSH (php-ssh2) |
+| `inject_pdf_read` | local | Extract text and questions from inject PDFs (challenge briefings) |
+
+### Cloud & Log Forensics
+
+| Adapter | Target | Description |
+|---------|--------|-------------|
+| `gzipped_log_parse` | local | Parse gzip-compressed log files (`.gz`, `.log.gz`) transparently — Nexus request/audit logs, rotated syslogs |
+| `cloudtrail_query` | local | Query AWS CloudTrail gzip-JSON logs across regions and dates; filter by source IP, access key, event name, service, error code |
+| `gh_security_log` | local | Parse GitHub Security Audit Log JSON — epoch-ms timestamps, action/actor/IP filters, auto-flags high-risk events (MFA bypass, unrecognized login, OAuth token creation) |
+
+### REMnux (SSH)
+
+| Adapter | Target | Description |
+|---------|--------|-------------|
+| `strings_and_iocs` | remnux | Extract strings via SSH |
 | `yara_scan` | remnux | YARA rule scanning |
 | `capa_scan` | remnux | Binary capability analysis |
 | `vol3_triage` | remnux | Volatility 3 triage — Windows and Linux profiles |
 | `timeline_build` | remnux | Plaso super timeline |
 | `pcap_summary` | remnux | PCAP network extraction (tshark); optional TLS decryption via keylog |
-| `inject_pdf_read` | remnux | Extract text and questions from inject PDFs (challenge briefings) |
+| `pcap_filter` | remnux | Targeted tshark filter + field extraction |
+| `pcap_carve` | remnux | TCP stream carving and file recovery from PCAPs |
+| `oletools_analyze` | remnux | Office document macro and VBA analysis |
 | `evtx_parse` | remnux | Parse Windows Event Log (.evtx) files with event ID filtering |
+
+### Disk Image Forensics (TSK / REMnux)
+
+| Adapter | Target | Description |
+|---------|--------|-------------|
+| `disk_timeline` | remnux | MAC-time filesystem timeline using `fls + mactime` (no log2timeline required) |
+| `mft_search` | remnux | Find files by name pattern in MFT |
+| `registry_parse` | remnux | Extract Windows registry hives via `icat + regripper` |
+| `prefetch_parse` | remnux | Parse Windows Prefetch execution history |
+
+### FLARE-VM (WinRM)
+
+| Adapter | Target | Description |
+|---------|--------|-------------|
 | `pe_quicklook` | flare | PE metadata via WinRM |
 
 ## Knowledge Base (RAG)

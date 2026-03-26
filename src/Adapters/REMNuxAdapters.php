@@ -1214,3 +1214,381 @@ final class OletoolsAnalyze extends BaseAdapter
 		);
 	}
 }
+// ─────────────────────────────────────────────────────────────────
+// evtx_bulk_query
+// ─────────────────────────────────────────────────────────────────
+final class EvtxBulkQuery extends BaseAdapter
+{
+	public const NAME        = 'evtx_bulk_query';
+	public const VERSION     = '1.0.0';
+	public const DESCRIPTION = 'Parse and correlate multiple Windows EVTX files simultaneously (e.g. from a KAPE triage with 30+ log channels). Merges Security, System, Application, PowerShell Operational, and Sysmon events into a single chronological stream filtered by event ID, time window, username, or process name. Essential for cross-channel attack chain reconstruction.';
+	public const TARGET      = 'remnux';
+
+	public function getToolSchema(): array
+	{
+		return [
+			'name'        => self::NAME,
+			'description' => self::DESCRIPTION,
+			'parameters'  => [
+				'type'       => 'object',
+				'properties' => [
+					'evtx_dir' => [
+						'type'        => 'string',
+						'description' => 'Directory containing multiple .evtx files (e.g. KAPE_Triage/C/Windows/System32/winevt/Logs/). Relative to case dir.',
+					],
+					'event_ids' => [
+						'type'        => 'array',
+						'items'       => ['type' => 'integer'],
+						'description' => 'Filter to specific event IDs across all channels (e.g. [4624,4625,4688,4104,7045]). Empty = all events.',
+					],
+					'username' => [
+						'type'        => 'string',
+						'description' => 'Return only events referencing this user/account name (case-insensitive substring).',
+					],
+					'process_name' => [
+						'type'        => 'string',
+						'description' => 'Return only events referencing this process name (case-insensitive substring).',
+					],
+					'keyword' => [
+						'type'        => 'string',
+						'description' => 'Return only events whose XML contains this keyword (case-insensitive).',
+					],
+					'channels' => [
+						'type'        => 'array',
+						'items'       => ['type' => 'string'],
+						'description' => 'Limit to specific EVTX filenames (without path) e.g. ["Security.evtx","Microsoft-Windows-PowerShell%4Operational.evtx"]. Default: all.',
+					],
+					'time_from' => [
+						'type'        => 'string',
+						'description' => 'Start of time window (ISO-8601 or YYYY-MM-DD HH:MM:SS).',
+					],
+					'time_to' => [
+						'type'        => 'string',
+						'description' => 'End of time window.',
+					],
+					'max_events' => [
+						'type'        => 'integer',
+						'description' => 'Maximum events to return across all channels (default: 500).',
+						'default'     => 500,
+					],
+				],
+				'required' => ['evtx_dir'],
+			],
+		];
+	}
+
+	protected function execute(Workspace $case, Config $config, array $params): AdapterResult
+	{
+		$evtxDir    = $this->resolveFilePath($case, $this->requireParam($params, 'evtx_dir'));
+		$eventIds   = array_map('intval', $params['event_ids']   ?? []);
+		$username   = strtolower($params['username']    ?? '');
+		$procName   = strtolower($params['process_name'] ?? '');
+		$keyword    = strtolower($params['keyword']     ?? '');
+		$channels   = array_map('strtolower', $params['channels'] ?? []);
+		$timeFrom   = $params['time_from'] ?? '';
+		$timeTo     = $params['time_to']   ?? '';
+		$maxEvents  = (int) ($params['max_events'] ?? 500);
+
+		if (!is_dir($evtxDir)) return $this->errorResult("Directory not found: {$evtxDir}");
+
+		// Collect EVTX files
+		$files = glob("{$evtxDir}/*.evtx") ?: [];
+		if (!empty($channels)) {
+			$files = array_filter($files, fn($f) => in_array(strtolower(basename($f)), $channels, true));
+		}
+		$files = array_values($files);
+		if (empty($files)) return $this->errorResult("No .evtx files found in: {$evtxDir}");
+
+		$ssh  = remnux_ssh($config);
+		$rdir = $config->remnuxWorkDir;
+		$ssh->run("mkdir -p '{$rdir}'");
+
+		// Transfer all EVTX files to REMnux (using shared path where possible)
+		$rEvtxDir = "{$rdir}/evtx_bulk";
+		$ssh->run("mkdir -p '{$rEvtxDir}'");
+		foreach ($files as $lf) {
+			$t = SharedPath::ensureOnREMnux($lf, $config, $ssh, $rEvtxDir);
+			// If sftp, file is now at rEvtxDir/basename; if mount, note path
+		}
+
+		$rOut = "{$rdir}/evtx_bulk_out.json";
+
+		// Build filter args for evtx_dump (fast Rust tool) or python-evtx
+		$ssh->run(<<<BASH
+OUTFILE='{$rOut}'
+echo '[' > "\$OUTFILE"
+FIRST=1
+for evtx_file in '{$rEvtxDir}'/*.evtx; do
+  [ -f "\$evtx_file" ] || continue
+  CHAN=\$(basename "\$evtx_file")
+  if command -v evtx_dump &>/dev/null; then
+    evtx_dump -o jsonl "\$evtx_file" 2>/dev/null | while IFS= read -r line; do
+      [ -n "\$line" ] || continue
+      if [ "\$FIRST" = "0" ]; then echo ',' >> "\$OUTFILE"; fi
+      echo "\$line" | python3 -c "
+import sys,json
+try:
+  d=json.load(sys.stdin)
+  d['_channel']='$CHAN'
+  print(json.dumps(d))
+except: pass
+" >> "\$OUTFILE" && FIRST=0
+    done
+  fi
+done
+echo ']' >> "\$OUTFILE"
+BASH, 180);
+
+		$localOut = "{$case->derivedDir}/evtx_bulk_" . time() . '.json';
+		$ssh->copyFrom($rOut, $localOut);
+		$ssh->run("rm -rf '{$rEvtxDir}' '{$rOut}'");
+
+		// Parse + filter locally
+		$content = file_exists($localOut) ? file_get_contents($localOut) : '';
+		$records = json_decode($content, true) ?: [];
+
+		if (empty($records)) {
+			// Fallback: run evtx_parse individually per channel then merge here
+			$allRecords = [];
+			foreach (array_slice($files, 0, 10) as $lf) {
+				$stem  = pathinfo($lf, PATHINFO_FILENAME);
+				$t     = SharedPath::ensureOnREMnux($lf, $config, $ssh, $rdir);
+				$rPath = $t['path'];
+				$rJ    = "{$rdir}/{$stem}_tmp.json";
+				$ssh->run("if command -v evtx_dump &>/dev/null; then evtx_dump -o jsonl '{$rPath}' > '{$rJ}' 2>/dev/null; fi", 60);
+				$lJ = "{$case->derivedDir}/{$stem}_tmp.json";
+				$ssh->copyFrom($rJ, $lJ);
+				$ssh->run("rm -f '{$rJ}'");
+				if ($t['method'] === 'sftp') $ssh->run("rm -f '{$rPath}'");
+				if (file_exists($lJ)) {
+					foreach (file($lJ, FILE_IGNORE_NEW_LINES) ?: [] as $line) {
+						$r = json_decode($line, true);
+						if (is_array($r)) { $r['_channel'] = basename($lf); $allRecords[] = $r; }
+					}
+					unlink($lJ);
+				}
+			}
+			$records = $allRecords;
+		}
+
+		// Filter
+		$events    = [];
+		$eidCounts = [];
+		$tsFrom    = $timeFrom !== '' ? strtotime($timeFrom) : 0;
+		$tsTo      = $timeTo   !== '' ? strtotime($timeTo) : PHP_INT_MAX;
+
+		foreach ($records as $rec) {
+			// Extract common fields from JSON or XML-parsed structure
+			$eid  = $rec['Event']['System']['EventID'] ?? null;
+			if (is_array($eid)) $eid = $eid['#text'] ?? null;
+			$ts   = $rec['Event']['System']['TimeCreated']['#attributes']['SystemTime'] ?? '';
+			$xml  = isset($rec['xml']) ? $rec['xml'] : json_encode($rec);
+
+			if ($eid === null && preg_match('/<EventID[^>]*>(\d+)</', $xml, $m)) $eid = (int) $m[1];
+			if ($ts  === '' && preg_match('/SystemTime=["\']([^"\']+)/', $xml, $m))  $ts  = $m[1];
+
+			$eidI = (int) $eid;
+			$tRec = $ts !== '' ? strtotime($ts) : 0;
+
+			if (!empty($eventIds) && !in_array($eidI, $eventIds, true)) continue;
+			if ($tRec > 0 && ($tRec < $tsFrom || $tRec > $tsTo))        continue;
+			if ($username  !== '' && !str_contains(strtolower($xml), $username))  continue;
+			if ($procName  !== '' && !str_contains(strtolower($xml), $procName))  continue;
+			if ($keyword   !== '' && !str_contains(strtolower($xml), $keyword))   continue;
+
+			$eidCounts[$eidI] = ($eidCounts[$eidI] ?? 0) + 1;
+			if (count($events) < $maxEvents) $events[] = $rec;
+		}
+
+		arsort($eidCounts);
+
+		$result = [
+			'files_processed'  => count($files),
+			'total_records'    => count($records),
+			'matched_events'   => count($events),
+			'event_id_summary' => array_slice($eidCounts, 0, 20, true),
+			'events'           => array_slice($events, 0, 50),
+		];
+
+		$this->writeJson($localOut, $result);
+
+		$evidence = ["evtx_bulk:files={$result['files_processed']}:matched={$result['matched_events']}"];
+		foreach (array_slice($eidCounts, 0, 10, true) as $eid => $cnt) $evidence[] = "evtx_bulk:EventID={$eid}:count={$cnt}";
+
+		return new AdapterResult(
+			adapterName:       self::NAME,
+			success:           !empty($events),
+			producedFiles:     [$localOut],
+			structuredResults: $result,
+			evidencePointers:  $evidence,
+			stdoutExcerpt:     "EVTX bulk: {$result['files_processed']} files, {$result['total_records']} records, {$result['matched_events']} matched. Top IDs: " . json_encode(array_slice($eidCounts, 0, 5, true)),
+			stderrExcerpt:     '',
+			execResult:        new ExecResult(0, '', '', 0, "ssh:{$config->remnuxHost}", 'evtx_bulk_query'),
+		);
+	}
+}
+
+// ─────────────────────────────────────────────────────────────────
+// pcap_stream_extract
+// ─────────────────────────────────────────────────────────────────
+final class PcapStreamExtract extends BaseAdapter
+{
+	public const NAME        = 'pcap_stream_extract';
+	public const VERSION     = '1.0.0';
+	public const DESCRIPTION = 'Extract and reassemble TCP/UDP stream payloads from a PCAP/PCAPNG using tshark --export-objects and follow-stream. Returns full HTTP request/response bodies, file objects transferred over HTTP/SMB/FTP, and raw stream content for C2 analysis. More powerful than pcap_filter for payload recovery.';
+	public const TARGET      = 'remnux';
+
+	public function getToolSchema(): array
+	{
+		return [
+			'name'        => self::NAME,
+			'description' => self::DESCRIPTION,
+			'parameters'  => [
+				'type'       => 'object',
+				'properties' => [
+					'pcap_path' => [
+						'type'        => 'string',
+						'description' => 'Path to PCAP/PCAPNG file (relative to case dir).',
+					],
+					'mode' => [
+						'type'        => 'string',
+						'enum'        => ['http_objects', 'stream_follow', 'beaconing'],
+						'description' => 'Extraction mode: "http_objects" exports files transferred over HTTP; "stream_follow" reassembles TCP streams to text; "beaconing" analyses inter-packet intervals per destination to detect C2 heartbeats.',
+						'default'     => 'http_objects',
+					],
+					'stream_index' => [
+						'type'        => 'integer',
+						'description' => 'For mode=stream_follow: TCP stream index to extract (0-based). Use pcap_filter first to identify the stream index.',
+					],
+					'filter' => [
+						'type'        => 'string',
+						'description' => 'Wireshark display filter to narrow the PCAP before processing (e.g. "ip.addr==10.0.0.1").',
+					],
+					'max_streams' => [
+						'type'        => 'integer',
+						'description' => 'For stream_follow: max number of streams to extract (default: 10).',
+						'default'     => 10,
+					],
+				],
+				'required' => ['pcap_path'],
+			],
+		];
+	}
+
+	protected function execute(Workspace $case, Config $config, array $params): AdapterResult
+	{
+		$pcapPath    = $this->resolveFilePath($case, $this->requireParam($params, 'pcap_path'));
+		$mode        = $params['mode']         ?? 'http_objects';
+		$streamIdx   = $params['stream_index'] ?? null;
+		$filter      = $params['filter']       ?? '';
+		$maxStreams   = (int) ($params['max_streams'] ?? 10);
+
+		if (!file_exists($pcapPath)) return $this->errorResult("File not found: {$pcapPath}");
+
+		$ssh  = remnux_ssh($config);
+		$rdir = $config->remnuxWorkDir;
+		$ssh->run("mkdir -p '{$rdir}'");
+		$transfer = SharedPath::ensureOnREMnux($pcapPath, $config, $ssh, $rdir);
+		$rPcap    = $transfer['path'];
+		$stem     = pathinfo($pcapPath, PATHINFO_FILENAME);
+
+		$results  = []; $evidence = []; $producedFiles = [];
+		$filterArg = $filter !== '' ? " -Y " . escapeshellarg($filter) : '';
+
+		if ($mode === 'http_objects') {
+			// Export HTTP objects (transferred files) to a temp dir
+			$rObjDir = "{$rdir}/http_objects_{$stem}";
+			$ssh->run("mkdir -p '{$rObjDir}'");
+			$r = $ssh->run("tshark -r '{$rPcap}'{$filterArg} --export-objects 'http,{$rObjDir}' 2>/dev/null", 120);
+
+			// List exported objects
+			$listing = $ssh->run("ls -la '{$rObjDir}' 2>/dev/null");
+			$objects = [];
+			foreach (explode("\n", $listing->stdout) as $line) {
+				if (preg_match('/(\d+)\s+(\S+.*)$/', $line, $m)) {
+					$fname   = trim($m[2]);
+					$size    = (int) $m[1];
+					$lLocal  = "{$case->derivedDir}/http_obj_{$stem}_" . basename($fname);
+					$ssh->copyFrom("{$rObjDir}/{$fname}", $lLocal);
+					if (file_exists($lLocal)) {
+						$objects[] = ['filename' => $fname, 'size_bytes' => $size, 'sha256' => hash_file('sha256', $lLocal), 'local' => $lLocal];
+						$producedFiles[] = $lLocal;
+						$evidence[] = "pcap:http_object:{$fname}:sha256=" . hash_file('sha256', $lLocal);
+					}
+				}
+			}
+			$ssh->run("rm -rf '{$rObjDir}'");
+			$results = ['mode' => 'http_objects', 'objects_exported' => count($objects), 'objects' => $objects];
+
+		} elseif ($mode === 'stream_follow') {
+			$streams  = [];
+			$idxRange = $streamIdx !== null ? [$streamIdx] : range(0, $maxStreams - 1);
+			foreach ($idxRange as $idx) {
+				$rOut = "{$rdir}/stream_{$idx}.txt";
+				$r    = $ssh->run("tshark -r '{$rPcap}'{$filterArg} -q -z 'follow,tcp,ascii,{$idx}' 2>/dev/null | head -300 > '{$rOut}' 2>/dev/null", 60);
+				$lOut = "{$case->derivedDir}/{$stem}_stream_{$idx}.txt";
+				$ssh->copyFrom($rOut, $lOut);
+				$ssh->run("rm -f '{$rOut}'");
+				if (file_exists($lOut) && filesize($lOut) > 50) {
+					$content   = mb_substr(file_get_contents($lOut), 0, 8000);
+					$streams[] = ['stream_index' => $idx, 'content_preview' => $content];
+					$producedFiles[] = $lOut;
+					// Flag IOCs in stream
+					if (preg_match_all('/https?:\/\/[^\s\'"<>]+/i', $content, $m)) foreach ($m[0] as $u) $evidence[] = 'pcap:stream_url=' . mb_substr($u, 0, 80);
+					if (preg_match_all('/[0-9a-f]{32,}/i', $content, $m)) foreach (array_slice($m[0], 0, 5) as $h) $evidence[] = "pcap:stream_hash={$h}";
+				} else { break; }
+			}
+			$results = ['mode' => 'stream_follow', 'streams_extracted' => count($streams), 'streams' => $streams];
+
+		} elseif ($mode === 'beaconing') {
+			// Analyse inter-packet timing per destination — detect regular C2 heartbeats
+			$rOut = "{$rdir}/beacon_analysis.txt";
+			$ssh->run("tshark -r '{$rPcap}'{$filterArg} -T fields -e frame.time_epoch -e ip.dst -e tcp.dstport -E separator='|' 2>/dev/null | sort > '{$rOut}'", 90);
+			$lOut = "{$case->derivedDir}/{$stem}_beaconing.txt";
+			$ssh->copyFrom($rOut, $lOut); $ssh->run("rm -f '{$rOut}'");
+
+			$intervals = [];
+			if (file_exists($lOut)) {
+				$lines    = file($lOut, FILE_IGNORE_NEW_LINES) ?: [];
+				$byDst    = [];
+				foreach ($lines as $line) {
+					[$ts, $dst, $dport] = array_pad(explode('|', $line), 3, '');
+					if (!$dst) continue;
+					$key = "{$dst}:{$dport}";
+					$byDst[$key][] = (float) $ts;
+				}
+				foreach ($byDst as $dst => $times) {
+					if (count($times) < 5) continue;
+					$diffs = [];
+					for ($i = 1; $i < count($times); $i++) $diffs[] = $times[$i] - $times[$i - 1];
+					$mean = array_sum($diffs) / count($diffs);
+					$stddev = sqrt(array_sum(array_map(fn($d) => ($d - $mean) ** 2, $diffs)) / count($diffs));
+					if ($stddev < $mean * 0.15 && $mean > 0) { // CV < 15% = very regular
+						$intervals[] = ['destination' => $dst, 'packet_count' => count($times), 'mean_interval_s' => round($mean, 2), 'stddev_s' => round($stddev, 3)];
+						$evidence[]  = "pcap:beacon:{$dst}:interval={$mean}s:cv=" . round($stddev / $mean, 3);
+					}
+				}
+				usort($intervals, fn($a, $b) => $a['stddev_s'] <=> $b['stddev_s']);
+				$producedFiles[] = $lOut;
+			}
+			$results = ['mode' => 'beaconing', 'beacon_candidates' => count($intervals), 'candidates' => array_slice($intervals, 0, 20)];
+		}
+
+		if ($transfer['method'] === 'sftp') $ssh->run("rm -f '{$rPcap}'");
+
+		$outJson = "{$case->derivedDir}/pcap_stream_{$mode}_{$stem}.json";
+		$this->writeJson($outJson, $results);
+		$producedFiles[] = $outJson;
+
+		return new AdapterResult(
+			adapterName:       self::NAME,
+			success:           !empty($results),
+			producedFiles:     $producedFiles,
+			structuredResults: $results,
+			evidencePointers:  array_slice($evidence, 0, 30),
+			stdoutExcerpt:     "PCAP stream extract [{$mode}]: " . json_encode(array_diff_key($results, ['objects' => 1, 'streams' => 1, 'candidates' => 1])),
+			stderrExcerpt:     '',
+			execResult:        new ExecResult(0, '', '', 0, "ssh:{$config->remnuxHost}", 'pcap_stream_extract'),
+		);
+	}
+}

@@ -17,6 +17,7 @@ $grouped = [
 	__DIR__ . '/src/Adapters/RagAdapter.php',
 	__DIR__ . '/src/Adapters/DiskAdapters.php',
 	__DIR__ . '/src/Adapters/CloudAdapters.php',
+	__DIR__ . '/src/Adapters/ForensicAdapters.php',
 ];
 foreach ($grouped as $file) {
 	if (file_exists($file)) {

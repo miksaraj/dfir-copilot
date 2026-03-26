@@ -272,8 +272,10 @@ Safe to run at any time — only `inventory.json` is modified, no evidence files
 |---------|--------|-------------|
 | `gzipped_log_parse` | local | Parse gzip-compressed log files (`.gz`, `.log.gz`) transparently — Nexus request/audit logs, rotated syslogs |
 | `cloudtrail_query` | local | Query AWS CloudTrail gzip-JSON logs across regions and dates; filter by source IP, access key, event name, service, error code |
-| `gh_security_log` | local | Parse GitHub Security Audit Log JSON — epoch-ms timestamps, action/actor/IP filters, auto-flags high-risk events (MFA bypass, unrecognized login, OAuth token creation) |
-| `s3_access_log_query` | local | Query a directory of S3 / ObjectVault server access log files in bulk; filter by source IP, HTTP method, object key prefix, operation type, or status code — eliminates per-file `log_parse` overhead |
+| `gh_security_log` | local | Parse a GitHub Security Audit Log JSON export. Converts epoch-ms `@timestamp` to ISO-8601, filters by action/actor/IP/time range, auto-flags high-risk events |
+| `s3_access_log_query` | local | Query a directory of S3 / ObjectVault server access logs in bulk; filter by IP, method, key prefix, operation, or status code |
+| `nexus_audit_log_parse` | local | Parse Sonatype Nexus3 request/audit logs (CLF format). Reconstructs component download events, source IPs, and timestamps — blast-radius assessment for poisoned packages |
+| `lambda_invocation_parse` | local | Parse AWS CloudWatch Lambda invocation CSVs. Detects anomalous durations (exfil spikes), cold-start deployments, and error-rate changes using statistical outlier detection |
 
 ### REMnux (SSH)
 
@@ -288,16 +290,32 @@ Safe to run at any time — only `inventory.json` is modified, no evidence files
 | `pcap_filter` | remnux | Targeted tshark filter + field extraction |
 | `pcap_carve` | remnux | TCP stream carving and file recovery from PCAPs |
 | `oletools_analyze` | remnux | Office document macro and VBA analysis |
-| `evtx_parse` | remnux | Parse Windows Event Log (.evtx) files with event ID filtering |
+| `evtx_parse` | remnux | Parse a single Windows Event Log (.evtx) with event ID filtering |
+| `evtx_bulk_query` | remnux | Parse and correlate **multiple** EVTX channels simultaneously (Security, System, PowerShell, Sysmon). Merges into a single chronological stream filtered by event ID, username, process name, or keyword |
+| `pcap_stream_extract` | remnux | Extract TCP/UDP stream payloads from PCAP/PCAPNG. Three modes: `http_objects` (export transferred files), `stream_follow` (full stream reassembly), `beaconing` (inter-packet interval analysis for C2 heartbeat detection) |
 
 ### Disk Image Forensics (TSK / REMnux)
 
 | Adapter | Target | Description |
 |---------|--------|-------------|
 | `disk_timeline` | remnux | MAC-time filesystem timeline using `fls + mactime` (no log2timeline required) |
-| `mft_search` | remnux | Find files by name pattern in MFT |
+| `mft_search` | remnux | Find files by name pattern in MFT (requires E01/raw image) |
+| `mft_parse` | remnux | Parse a raw `$MFT` binary (from KAPE triage). Recovers deleted file records, detects timestomping ($SI vs $FN skew > 10 s), produces a searchable CSV via analyzeMFT |
 | `registry_parse` | remnux | Extract Windows registry hives via `icat + regripper` |
 | `prefetch_parse` | remnux | Parse Windows Prefetch execution history |
+| `shimcache_amcache_parse` | remnux | Extract ShimCache (AppCompatCache from SYSTEM hive) and Amcache.hve via regripper — reveals execution history of deleted tools with no prefetch entry |
+
+### Forensic Speciality
+
+| Adapter | Target | Description |
+|---------|--------|-------------|
+| `email_parse` | local | Parse raw `.eml` files: Received-chain hops, originating IP, SPF/DKIM/DMARC headers, MIME attachments, embedded URLs, and full header dump |
+| `git_diff_parse` | local | Parse unified diff / `git format-patch` files into structured hunks. Identifies added/removed lines, extracts secret patterns (API keys, passwords, tokens), flags binary file changes |
+| `ci_log_parse` | local | Parse GitHub Actions log ZIP archives. Decodes step logs, searches across all steps for errors, secrets, artefact paths, and custom patterns. Handles ZIP-in-ZIP bundles |
+| `pipeline_log_parse` | local | Parse CodeForge/custom CI pipeline evidence (event_history CSV, runner logs, artefact manifests). Extracts build events, failure steps, artefact hashes, and runner metadata |
+| `lua_script_analyse` | remnux | Analyse a Lua-based implant bundle: string-extract `lua.exe`/`.dll`, parse `conf.txt` for C2 configuration, attempt bytecode decompilation via unluac/luadec |
+| `lnk_and_jumplist_parse` | remnux | Parse Windows Shell Link (`.lnk`) files from a KAPE-extracted directory. Returns target paths, volume serial numbers, and timestamps — confirms remote share access, USB usage, and attacker file-open history |
+| `linux_artefact_parse` | local | Parse Linux forensic artefacts from a filesystem dump: `auth.log` (SSH/sudo logins), `bash_history`, crontabs, systemd units, `authorized_keys`, `/etc/passwd`, `dpkg.log` |
 
 ### FLARE-VM (WinRM)
 
@@ -411,11 +429,14 @@ dfir-copilot/
 │   │   ├── SSHExecutor.php  ← REMnux via php-ssh2 + SFTP
 │   │   └── WinRMExecutor.php← FLARE-VM via curl + WinRM SOAP
 │   ├── Adapters/
-│   │   ├── BaseAdapter.php  ← Base class + registry
-│   │   ├── HostAdapters.php ← intake, file_id, iocs, attack_map, actor_rank
-│   │   ├── REMnuxAdapters.php ← strings, yara, capa, vol3, plaso, pcap
-│   │   ├── FLAREAdapters.php  ← pe_quicklook
-│   │   └── RagAdapter.php  ← knowledge_search (queries the RAG index)
+│   │   ├── BaseAdapter.php      ← Base class + registry
+│   │   ├── HostAdapters.php     ← intake, file_id, iocs, attack_map, actor_rank
+│   │   ├── REMnuxAdapters.php   ← strings, yara, capa, vol3, plaso, pcap, evtx_bulk, pcap_stream
+│   │   ├── DiskAdapters.php     ← disk_timeline, mft_search, mft_parse, registry, prefetch, shimcache
+│   │   ├── CloudAdapters.php    ← cloudtrail, gh_security, s3, nexus, lambda
+│   │   ├── ForensicAdapters.php ← email, git_diff, ci_log, pipeline, lua, lnk, linux_artefact
+│   │   ├── FLAREAdapters.php    ← pe_quicklook
+│   │   └── RagAdapter.php       ← knowledge_search (queries the RAG index)
 │   ├── Rag/
 │   │   ├── Chunker.php     ← Sentence-aware text chunker
 │   │   ├── Embedder.php    ← Ollama embedding API client

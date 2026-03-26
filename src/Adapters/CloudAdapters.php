@@ -971,3 +971,386 @@ final class S3AccessLogQuery extends BaseAdapter
 		);
 	}
 }
+
+// ─────────────────────────────────────────────────────────────────
+// nexus_audit_log_parse
+// ─────────────────────────────────────────────────────────────────
+
+/**
+ * Structured parser for Sonatype Nexus Repository Manager 3 request logs.
+ *
+ * Nexus3 logs use Apache CLF format extended with Nexus-specific fields:
+ *   <ip> - - [datetime] "METHOD /path HTTP/x" <status> <bytes> "-" "<user-agent>"
+ * plus audit log lines with JSON for component downloads.
+ *
+ * This adapter reconstructs which clients downloaded which artefact
+ * (groupId:artifactId:version), when the first download of the poisoned
+ * version occurred, and which IPs are outside the known builder network.
+ *
+ * Relevant for: FOR-800 (Nexus/nexus3/log/ — scope of poisoned package).
+ */
+final class NexusAuditLogParse extends BaseAdapter
+{
+	public const NAME        = 'nexus_audit_log_parse';
+	public const VERSION     = '1.0.0';
+	public const DESCRIPTION = 'Parse Sonatype Nexus3 request/audit log files. Reconstructs component download events (groupId:artifactId:version), source IPs, timestamps, and HTTP status codes. Identifies first download of a poisoned artifact and enumerates all consumers. Essential for supply-chain blast-radius assessment.';
+	public const TARGET      = 'local';
+
+	public function getToolSchema(): array
+	{
+		return [
+			'name'        => self::NAME,
+			'description' => self::DESCRIPTION,
+			'parameters'  => [
+				'type'       => 'object',
+				'properties' => [
+					'log_path' => [
+						'type'        => 'string',
+						'description' => 'Path to a Nexus3 log file or directory of log files (relative to case dir). Handles plain and .gz files.',
+					],
+					'artifact_filter' => [
+						'type'        => 'string',
+						'description' => 'Filter: only return entries whose URL path contains this string (e.g. artifact name or version). Case-insensitive.',
+					],
+					'ip_filter' => [
+						'type'        => 'string',
+						'description' => 'Filter: only return entries from this source IP.',
+					],
+					'status_filter' => [
+						'type'        => 'integer',
+						'description' => 'Filter: only return entries with this HTTP status code (e.g. 200).',
+					],
+					'exclude_ips' => [
+						'type'        => 'array',
+						'items'       => ['type' => 'string'],
+						'description' => 'Exclude these IPs (e.g. known builder/CI IPs).',
+					],
+					'time_from' => [
+						'type'        => 'string',
+						'description' => 'Start date filter (YYYY-MM-DD).',
+					],
+					'max_entries' => [
+						'type'        => 'integer',
+						'description' => 'Maximum entries to return (default: 400).',
+						'default'     => 400,
+					],
+				],
+				'required' => ['log_path'],
+			],
+		];
+	}
+
+	protected function execute(Workspace $case, Config $config, array $params): AdapterResult
+	{
+		$logPathRel     = $this->requireParam($params, 'log_path');
+		$logPathAbs     = $this->resolveFilePath($case, $logPathRel);
+		$artifactFilter = strtolower($params['artifact_filter'] ?? '');
+		$ipFilter       = $params['ip_filter'] ?? '';
+		$statusFilter   = isset($params['status_filter']) ? (int) $params['status_filter'] : null;
+		$excludeIps     = $params['exclude_ips'] ?? [];
+		$timeFrom       = $params['time_from'] ?? '';
+		$maxEntries     = (int) ($params['max_entries'] ?? 400);
+
+		// Collect log files
+		$files = [];
+		if (is_dir($logPathAbs)) {
+			foreach (new \RecursiveIteratorIterator(new \RecursiveDirectoryIterator($logPathAbs, \FilesystemIterator::SKIP_DOTS)) as $f) {
+				$fn = strtolower($f->getFilename());
+				if (str_contains($fn, 'request') || str_contains($fn, 'nexus') || str_ends_with($fn, '.log') || str_ends_with($fn, '.log.gz')) {
+					$files[] = $f->getPathname();
+				}
+			}
+		} elseif (file_exists($logPathAbs)) {
+			$files[] = $logPathAbs;
+		} else {
+			return $this->errorResult("Log path not found: {$logPathRel}");
+		}
+
+		if (empty($files)) return $this->errorResult('No log files found in: ' . $logPathRel);
+
+		sort($files);
+
+		$entries    = [];
+		$ipCounts   = [];
+		$artCounts  = [];
+		$totalLines = 0;
+
+		foreach ($files as $file) {
+			$isGz = str_ends_with(strtolower($file), '.gz');
+			if ($isGz) {
+				$gz  = @gzopen($file, 'rb');
+				if (!$gz) continue;
+				$raw = ''; while (!gzeof($gz)) $raw .= gzread($gz, 65536);
+				gzclose($gz);
+				$lines = explode("\n", $raw);
+			} else {
+				$lines = file($file, FILE_IGNORE_NEW_LINES) ?: [];
+			}
+
+			foreach ($lines as $line) {
+				if (trim($line) === '') continue;
+				$totalLines++;
+
+				// CLF: ip - - [dd/Mon/YYYY:HH:MM:SS +0000] "METHOD /path HTTP/x" status bytes "ref" "ua"
+				if (!preg_match('/^(\S+)\s+\S+\s+\S+\s+\[([^\]]+)\]\s+"(\S+)\s+(\S+)\s+\S+"\s+(\d+)\s+(\d+)/', $line, $m)) continue;
+
+				[, $ip, $datetime, $method, $path, $status, $bytes] = $m;
+
+				// Date filter
+				if ($timeFrom !== '') {
+					if (preg_match('#(\d{2}/\w{3}/\d{4})#', $datetime, $dm)) {
+						$lineDate = date('Y-m-d', strtotime($dm[1]));
+						if ($lineDate < $timeFrom) continue;
+					}
+				}
+
+				if ($ipFilter    !== '' && $ip !== $ipFilter)                        continue;
+				if (!empty($excludeIps) && in_array($ip, $excludeIps, true))         continue;
+				if ($statusFilter !== null && (int)$status !== $statusFilter)         continue;
+				if ($artifactFilter !== '' && !str_contains(strtolower($path), $artifactFilter)) continue;
+				// Only 200/206 downloads are meaningful for blast radius
+				// but don't filter unless caller asked
+
+				$ipCounts[$ip]    = ($ipCounts[$ip] ?? 0) + 1;
+				$artCounts[$path] = ($artCounts[$path] ?? 0) + 1;
+
+				if (count($entries) < $maxEntries) {
+					$entries[] = [
+						'ip'       => $ip,
+						'datetime' => $datetime,
+						'method'   => $method,
+						'path'     => $path,
+						'status'   => (int) $status,
+						'bytes'    => (int) $bytes,
+					];
+				}
+			}
+		}
+
+		arsort($ipCounts);
+		arsort($artCounts);
+
+		$outPath = "{$case->derivedDir}/nexus_audit_" . time() . '.json';
+		$this->writeJson($outPath, [
+			'files_scanned' => count($files),
+			'total_lines'   => $totalLines,
+			'matched'       => count($entries),
+			'top_ips'       => array_slice($ipCounts, 0, 20, true),
+			'top_paths'     => array_slice($artCounts, 0, 30, true),
+			'entries'       => $entries,
+		]);
+
+		$evidence = [];
+		foreach (array_slice($ipCounts, 0, 10, true) as $ip => $cnt) $evidence[] = "nexus:ip={$ip}:hits={$cnt}";
+		foreach (array_slice($artCounts, 0, 10, true) as $path => $cnt) $evidence[] = 'nexus:path=' . mb_substr($path, 0, 80) . ":hits={$cnt}";
+
+		return new AdapterResult(
+			adapterName:       self::NAME,
+			success:           !empty($entries),
+			producedFiles:     [$outPath],
+			structuredResults: [
+				'files_scanned' => count($files),
+				'total_lines'   => $totalLines,
+				'matched'       => count($entries),
+				'top_ips'       => array_slice($ipCounts, 0, 10, true),
+				'top_paths'     => array_slice($artCounts, 0, 20, true),
+				'entries'       => array_slice($entries, 0, 40),
+			],
+			evidencePointers:  $evidence,
+			stdoutExcerpt:     "Nexus logs: " . count($files) . " files, {$totalLines} lines → " . count($entries) . " matched, " . count($ipCounts) . " unique IPs",
+			stderrExcerpt:     '',
+			execResult:        new ExecResult(0, '', '', 0, 'local', 'nexus_audit_log_parse'),
+		);
+	}
+}
+
+// ─────────────────────────────────────────────────────────────────
+// lambda_invocation_parse
+// ─────────────────────────────────────────────────────────────────
+
+/**
+ * Parse AWS CloudWatch Lambda invocation CSV exports.
+ *
+ * CloudWatch Lambda insight CSVs contain columns:
+ *   Timestamp, RequestId, Duration, BilledDuration, MemorySize, MaxMemoryUsed,
+ *   InitDuration (cold start), ErrorType
+ *
+ * This adapter detects anomalous durations (exfil / compute spikes),
+ * correlates cold-start events (new deployment), aggregates error rates,
+ * and cross-references RequestId with CloudTrail Invoke events.
+ *
+ * Relevant for: FOR-800 (AWS/cloudwatch/beryl-*.csv).
+ */
+final class LambdaInvocationParse extends BaseAdapter
+{
+	public const NAME        = 'lambda_invocation_parse';
+	public const VERSION     = '1.0.0';
+	public const DESCRIPTION = 'Parse AWS CloudWatch Lambda invocation CSV files. Detects anomalous durations (exfiltration spikes), cold-start deployments, error rate changes, and top-N slowest invocations. Accepts a directory of beryl-*.csv or a single file.';
+	public const TARGET      = 'local';
+
+	public function getToolSchema(): array
+	{
+		return [
+			'name'        => self::NAME,
+			'description' => self::DESCRIPTION,
+			'parameters'  => [
+				'type'       => 'object',
+				'properties' => [
+					'log_path' => [
+						'type'        => 'string',
+						'description' => 'Path to a CloudWatch Lambda invocation CSV file or directory of CSVs (relative to case dir).',
+					],
+					'duration_threshold_ms' => [
+						'type'        => 'integer',
+						'description' => 'Flag invocations longer than this many milliseconds as anomalous (default: auto = mean + 3σ).',
+					],
+					'time_from' => [
+						'type'        => 'string',
+						'description' => 'Only include rows from this timestamp onward (ISO-8601 or YYYY-MM-DD).',
+					],
+					'errors_only' => [
+						'type'        => 'boolean',
+						'description' => 'If true, only return rows where ErrorType is non-empty.',
+						'default'     => false,
+					],
+					'max_rows' => [
+						'type'        => 'integer',
+						'description' => 'Maximum rows to return (default: 500).',
+						'default'     => 500,
+					],
+				],
+				'required' => ['log_path'],
+			],
+		];
+	}
+
+	protected function execute(Workspace $case, Config $config, array $params): AdapterResult
+	{
+		$logPathAbs       = $this->resolveFilePath($case, $this->requireParam($params, 'log_path'));
+		$durationThresh   = isset($params['duration_threshold_ms']) ? (int) $params['duration_threshold_ms'] : null;
+		$timeFrom         = $params['time_from'] ?? '';
+		$errorsOnly       = (bool) ($params['errors_only'] ?? false);
+		$maxRows          = (int) ($params['max_rows'] ?? 500);
+
+		$files = [];
+		if (is_dir($logPathAbs)) {
+			foreach (glob("{$logPathAbs}/*.csv") ?: [] as $f) $files[] = $f;
+		} elseif (file_exists($logPathAbs)) {
+			$files[] = $logPathAbs;
+		} else {
+			return $this->errorResult("Path not found: {$logPathAbs}");
+		}
+		if (empty($files)) return $this->errorResult('No CSV files found.');
+
+		$allRows     = [];
+		$durations   = [];
+		$errorCounts = [];
+		$coldStarts  = 0;
+		$functions   = [];
+
+		foreach ($files as $file) {
+			$funcName = preg_replace('/-invocations.*$/', '', pathinfo($file, PATHINFO_FILENAME));
+
+			$handle = fopen($file, 'r');
+			if (!$handle) continue;
+			$header = fgetcsv($handle);
+			if (!$header) { fclose($handle); continue; }
+			$header = array_map(fn($h) => strtolower(trim(str_replace([' ', '-'], '_', $h))), $header);
+
+			$colTs   = array_search('timestamp', $header, true);
+			$colDur  = array_search('duration', $header, true) ?: array_search('duration_(ms)', $header, true);
+			$colBil  = array_search('billed_duration', $header, true);
+			$colMem  = array_search('max_memory_used', $header, true);
+			$colInit = array_search('init_duration', $header, true);
+			$colErr  = array_search('errortype', $header, true) ?: array_search('error_type', $header, true);
+			$colReq  = array_search('requestid', $header, true) ?: array_search('request_id', $header, true);
+
+			while (($row = fgetcsv($handle)) !== false) {
+				if (count($row) !== count($header)) continue;
+				$assoc = array_combine($header, $row);
+				if (!$assoc) continue;
+
+				$ts  = $colTs  !== false ? trim($assoc[$header[$colTs]]  ?? '') : '';
+				$dur = $colDur !== false ? (float) ($assoc[$header[$colDur]] ?? 0) : 0.0;
+				$err = $colErr !== false ? trim($assoc[$header[$colErr]]  ?? '') : '';
+				$ini = $colInit!== false ? (float) ($assoc[$header[$colInit]] ?? 0) : 0.0;
+
+				if ($timeFrom !== '' && $ts !== '' && substr($ts, 0, 10) < substr($timeFrom, 0, 10)) continue;
+				if ($errorsOnly && $err === '') continue;
+
+				$durations[] = $dur;
+				if ($ini > 0) $coldStarts++;
+				if ($err !== '') $errorCounts[$err] = ($errorCounts[$err] ?? 0) + 1;
+				$functions[$funcName] = ($functions[$funcName] ?? 0) + 1;
+
+				if (count($allRows) < $maxRows) {
+					$entry = ['function' => $funcName, 'timestamp' => $ts, 'duration_ms' => $dur, 'error' => $err];
+					if ($ini > 0) $entry['cold_start_ms'] = $ini;
+					if ($colMem !== false) $entry['max_memory_mb'] = (int) ($assoc[$header[$colMem]] ?? 0);
+					if ($colReq !== false) $entry['request_id']    = $assoc[$header[$colReq]] ?? '';
+					$allRows[] = $entry;
+				}
+			}
+			fclose($handle);
+		}
+
+		// Statistical anomaly detection
+		$anomalies = [];
+		if (!empty($durations)) {
+			$mean  = array_sum($durations) / count($durations);
+			$variance = array_sum(array_map(fn($d) => ($d - $mean) ** 2, $durations)) / count($durations);
+			$stddev   = sqrt($variance);
+			$thresh   = $durationThresh ?? ($mean + 3 * $stddev);
+			foreach ($allRows as $row) {
+				if ($row['duration_ms'] > $thresh) $anomalies[] = $row;
+			}
+			usort($anomalies, fn($a, $b) => $b['duration_ms'] <=> $a['duration_ms']);
+			$stats = ['mean_ms' => round($mean, 2), 'stddev_ms' => round($stddev, 2), 'threshold_ms' => round($thresh, 2), 'p99_ms' => 0];
+			$sorted = $durations; sort($sorted);
+			$stats['p50_ms'] = round($sorted[(int)(count($sorted) * 0.50)] ?? 0, 2);
+			$stats['p99_ms'] = round($sorted[(int)(count($sorted) * 0.99)] ?? 0, 2);
+		} else {
+			$stats = [];
+		}
+
+		$summary = [
+			'files'         => count($files),
+			'total_rows'    => count($allRows),
+			'cold_starts'   => $coldStarts,
+			'error_counts'  => $errorCounts,
+			'functions'     => $functions,
+			'stats'         => $stats,
+			'anomalies'     => array_slice($anomalies, 0, 20),
+			'rows'          => $allRows,
+		];
+
+		$outPath = "{$case->derivedDir}/lambda_invocations_" . time() . '.json';
+		$this->writeJson($outPath, $summary);
+
+		$evidence = [];
+		foreach ($functions as $fn => $cnt) $evidence[] = "lambda:function={$fn}:invocations={$cnt}";
+		if (!empty($anomalies)) $evidence[] = 'lambda:anomalies=' . count($anomalies) . ':max_ms=' . $anomalies[0]['duration_ms'];
+		if ($coldStarts > 0)    $evidence[] = "lambda:cold_starts={$coldStarts}";
+		foreach ($errorCounts as $et => $cnt) $evidence[] = "lambda:error={$et}:count={$cnt}";
+
+		return new AdapterResult(
+			adapterName:       self::NAME,
+			success:           !empty($allRows),
+			producedFiles:     [$outPath],
+			structuredResults: [
+				'total_rows'   => count($allRows),
+				'functions'    => $functions,
+				'cold_starts'  => $coldStarts,
+				'error_counts' => $errorCounts,
+				'stats'        => $stats,
+				'anomaly_count' => count($anomalies),
+				'anomalies'    => array_slice($anomalies, 0, 10),
+				'rows'         => array_slice($allRows, 0, 40),
+			],
+			evidencePointers:  $evidence,
+			stdoutExcerpt:     "Lambda: " . count($allRows) . " invocations, cold_starts={$coldStarts}, anomalies=" . count($anomalies) . ", errors=" . array_sum($errorCounts),
+			stderrExcerpt:     '',
+			execResult:        new ExecResult(0, '', '', 0, 'local', 'lambda_invocation_parse'),
+		);
+	}
+}

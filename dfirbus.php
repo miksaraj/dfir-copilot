@@ -20,6 +20,11 @@ use DFIRCopilot\Adapters\{InjectPdfRead, EvtxParse, LogParse, ListDirectory, Dec
 use DFIRCopilot\Adapters\{DiskTimeline, MftSearch, RegistryParse, PrefetchParse};
 use DFIRCopilot\Adapters\{PcapFilter, PcapCarve, OletoolsAnalyze};
 use DFIRCopilot\Adapters\{GzippedLogParse, CloudTrailQuery, GhSecurityLog, S3AccessLogQuery};
+use DFIRCopilot\Adapters\{NexusAuditLogParse, LambdaInvocationParse};
+use DFIRCopilot\Adapters\{MftParse, ShimcacheAmcacheParse};
+use DFIRCopilot\Adapters\{EvtxBulkQuery, PcapStreamExtract};
+use DFIRCopilot\Adapters\{EmailParse, GitDiffParse, CiLogParse, PipelineLogParse};
+use DFIRCopilot\Adapters\{LuaScriptAnalyse, LnkAndJumplistParse, LinuxArtefactParse};
 
 // ── Adapter registration ─────────────────────────────────────────
 
@@ -57,6 +62,23 @@ function registerAllAdapters(): void
 	AdapterRegistry::register(new CloudTrailQuery());
 	AdapterRegistry::register(new GhSecurityLog());
 	AdapterRegistry::register(new S3AccessLogQuery());
+	// Tier 4 — Cloud platform (Nexus, Lambda/CloudWatch)
+	AdapterRegistry::register(new NexusAuditLogParse());
+	AdapterRegistry::register(new LambdaInvocationParse());
+	// Tier 5 — Disk forensics extensions (raw $MFT, ShimCache/Amcache)
+	AdapterRegistry::register(new MftParse());
+	AdapterRegistry::register(new ShimcacheAmcacheParse());
+	// Tier 6 — REMnux extensions (EVTX bulk, PCAP stream)
+	AdapterRegistry::register(new EvtxBulkQuery());
+	AdapterRegistry::register(new PcapStreamExtract());
+	// Tier 7 — Forensic speciality (email, diff, CI logs, pipeline, Lua, LNK, Linux)
+	AdapterRegistry::register(new EmailParse());
+	AdapterRegistry::register(new GitDiffParse());
+	AdapterRegistry::register(new CiLogParse());
+	AdapterRegistry::register(new PipelineLogParse());
+	AdapterRegistry::register(new LuaScriptAnalyse());
+	AdapterRegistry::register(new LnkAndJumplistParse());
+	AdapterRegistry::register(new LinuxArtefactParse());
 }
 
 // ── CLI helpers ──────────────────────────────────────────────────

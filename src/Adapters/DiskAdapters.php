@@ -692,3 +692,218 @@ PY;
 		return false;
 	}
 }
+
+// ─────────────────────────────────────────────────────────────────
+// mft_parse
+// ─────────────────────────────────────────────────────────────────
+final class MftParse extends BaseAdapter
+{
+	public const NAME        = 'mft_parse';
+	public const VERSION     = '1.0.0';
+	public const DESCRIPTION = 'Parse a raw Windows $MFT binary file (from KAPE triage). Recovers deleted file records, detects timestamp-stomping ($STANDARD_INFORMATION vs $FILE_NAME skew > 10s), produces a searchable CSV via analyzeMFT on REMnux. Use when you have the raw $MFT rather than an E01 image.';
+	public const TARGET      = 'remnux';
+
+	public function getToolSchema(): array
+	{
+		return [
+			'name'        => self::NAME,
+			'description' => self::DESCRIPTION,
+			'parameters'  => [
+				'type'       => 'object',
+				'properties' => [
+					'mft_path'       => ['type' => 'string',  'description' => 'Path to the raw $MFT binary file (relative to case dir).'],
+					'keyword'        => ['type' => 'string',  'description' => 'Filter entries whose path contains this keyword (case-insensitive).'],
+					'deleted_only'   => ['type' => 'boolean', 'description' => 'Only return deleted file records (in-use = 0). Default false.', 'default' => false],
+					'timestomp_only' => ['type' => 'boolean', 'description' => 'Only entries where $SI and $FN creation times differ by >10 s. Default false.', 'default' => false],
+					'time_from'      => ['type' => 'string',  'description' => 'Only entries created/modified on or after this date (YYYY-MM-DD).'],
+					'max_entries'    => ['type' => 'integer', 'description' => 'Max entries to return (default 500).', 'default' => 500],
+				],
+				'required' => ['mft_path'],
+			],
+		];
+	}
+
+	protected function execute(Workspace $case, Config $config, array $params): AdapterResult
+	{
+		$mftPath  = $this->resolveFilePath($case, $this->requireParam($params, 'mft_path'));
+		$keyword  = strtolower($params['keyword']      ?? '');
+		$delOnly  = (bool) ($params['deleted_only']    ?? false);
+		$tstOnly  = (bool) ($params['timestomp_only']  ?? false);
+		$timeFrom = $params['time_from']               ?? '';
+		$maxE     = (int) ($params['max_entries']      ?? 500);
+		if (!file_exists($mftPath)) return $this->errorResult("File not found: {$mftPath}");
+
+		$ssh  = remnux_ssh($config);
+		$rd   = $config->remnuxWorkDir;
+		$ssh->run("mkdir -p '{$rd}'");
+		$t    = SharedPath::ensureOnREMnux($mftPath, $config, $ssh, $rd);
+		$rMft = $t['path'];
+		$rCsv = "{$rd}/mft_out.csv";
+		$ssh->run(
+			"if command -v analyzeMFT.py &>/dev/null || command -v analyzeMFT &>/dev/null; then " .
+			"BIN=\$(command -v analyzeMFT.py 2>/dev/null || command -v analyzeMFT); " .
+			"python3 \"\$BIN\" -f '{$rMft}' -o '{$rCsv}' -e 2>/dev/null; " .
+			"elif command -v mftdump &>/dev/null; then mftdump --output-format csv '{$rMft}' > '{$rCsv}' 2>/dev/null; " .
+			"else echo 'NO_MFT_TOOL' > '{$rCsv}'; fi",
+			300
+		);
+		$lCsv = "{$case->derivedDir}/mft_" . pathinfo($mftPath, PATHINFO_FILENAME) . '.csv';
+		$ssh->copyFrom($rCsv, $lCsv);
+		$ssh->run("rm -f '{$rCsv}'");
+		if ($t['method'] === 'sftp') $ssh->run("rm -f '{$rMft}'");
+		if (!file_exists($lCsv) || filesize($lCsv) < 10) return $this->errorResult('analyzeMFT produced no output. Install: pip3 install analyzeMFT');
+		$head = trim((file($lCsv) ?: [''])[0]);
+		if (str_contains($head, 'NO_MFT_TOOL')) return $this->errorResult('No MFT parser on REMnux. Install: pip3 install analyzeMFT');
+
+		$fh      = fopen($lCsv, 'r');
+		$hdr     = array_map(fn($h) => strtolower(trim($h)), fgetcsv($fh) ?: []);
+		$entries = [];
+		$stats   = ['total' => 0, 'deleted' => 0, 'timestomped' => 0];
+		$cP      = $this->findMftCol($hdr, ['filename', 'path', 'full_path', 'name']);
+		$cI      = $this->findMftCol($hdr, ['in_use', 'active', 'allocated']);
+		$cSC     = $this->findMftCol($hdr, ['si_created', 'standard_information_create_date']);
+		$cFC     = $this->findMftCol($hdr, ['fn_created', 'file_name_create_date']);
+		$cSM     = $this->findMftCol($hdr, ['si_modified', 'standard_information_modification_date']);
+
+		while (($row = fgetcsv($fh)) !== false) {
+			if (count($row) < 3) continue;
+			$a = array_combine(array_slice($hdr, 0, count($row)), $row) ?: [];
+			$path = $cP  !== null ? ($a[$hdr[$cP]]  ?? '') : ($row[0] ?? '');
+			$iu   = $cI  !== null ? ($a[$hdr[$cI]]  ?? '1') : '1';
+			$siCr = $cSC !== null ? ($a[$hdr[$cSC]] ?? '') : '';
+			$fnCr = $cFC !== null ? ($a[$hdr[$cFC]] ?? '') : '';
+			$siMo = $cSM !== null ? ($a[$hdr[$cSM]] ?? '') : '';
+			$isDel = in_array(strtolower(trim($iu)), ['0','false','n','no','not in use'], true);
+			$diff  = ($siCr && $fnCr) ? abs(strtotime($siCr) - strtotime($fnCr)) : 0;
+			$isTSt = $diff > 10;
+			$stats['total']++;
+			if ($isDel) $stats['deleted']++;
+			if ($isTSt) $stats['timestomped']++;
+			if ($delOnly && !$isDel) continue;
+			if ($tstOnly && !$isTSt) continue;
+			if ($keyword !== '' && !str_contains(strtolower($path), $keyword)) continue;
+			if ($timeFrom !== '') {
+				$ed = substr($siMo ?: $siCr, 0, 10);
+				if ($ed && $ed < $timeFrom) continue;
+			}
+			if (count($entries) < $maxE) {
+				$e = ['path' => $path, 'deleted' => $isDel, 'si_created' => $siCr, 'fn_created' => $fnCr, 'si_modified' => $siMo];
+				if ($isTSt) $e['timestomp_diff_s'] = $diff;
+				$entries[] = $e;
+			}
+		}
+		fclose($fh);
+		$out = "{$case->derivedDir}/mft_parse_" . time() . '.json';
+		$this->writeJson($out, ['stats' => $stats, 'entries' => $entries]);
+		$ev = ["mft:total={$stats['total']}:deleted={$stats['deleted']}:timestomped={$stats['timestomped']}"];
+		foreach (array_slice($entries, 0, 20) as $e) {
+			$ev[] = 'mft:' . ($e['deleted'] ? 'DEL:' : '') . (isset($e['timestomp_diff_s']) ? 'TST:' : '') . mb_substr($e['path'], 0, 80);
+		}
+		return new AdapterResult(
+			adapterName:       self::NAME,
+			success:           !empty($entries),
+			producedFiles:     [$lCsv, $out],
+			structuredResults: ['stats' => $stats, 'matched' => count($entries), 'entries' => array_slice($entries, 0, 40)],
+			evidencePointers:  $ev,
+			stdoutExcerpt:     "MFT: total={$stats['total']}, deleted={$stats['deleted']}, timestomped={$stats['timestomped']}, matched=" . count($entries),
+			stderrExcerpt:     '',
+			execResult:        new ExecResult(0, '', '', 0, "ssh:{$config->remnuxHost}", 'mft_parse'),
+		);
+	}
+
+	private function findMftCol(array $h, array $c): ?int
+	{
+		foreach ($c as $candidate) {
+			$i = array_search($candidate, $h, true);
+			if ($i !== false) return (int) $i;
+			foreach ($h as $j => $col) { if (str_contains($col, $candidate)) return $j; }
+		}
+		return null;
+	}
+}
+
+// ─────────────────────────────────────────────────────────────────
+// shimcache_amcache_parse
+// ─────────────────────────────────────────────────────────────────
+final class ShimcacheAmcacheParse extends BaseAdapter
+{
+	public const NAME        = 'shimcache_amcache_parse';
+	public const VERSION     = '1.0.0';
+	public const DESCRIPTION = 'Extract Windows ShimCache (AppCompatCache from SYSTEM hive) and Amcache.hve via regripper on REMnux. Reveals execution history of deleted tools and one-shot lateral-movement utilities that left no prefetch entry.';
+	public const TARGET      = 'remnux';
+
+	public function getToolSchema(): array
+	{
+		return [
+			'name'        => self::NAME,
+			'description' => self::DESCRIPTION,
+			'parameters'  => [
+				'type'       => 'object',
+				'properties' => [
+					'system_hive'  => ['type' => 'string', 'description' => 'Path to SYSTEM registry hive (for ShimCache). Relative to case dir.'],
+					'amcache_hive' => ['type' => 'string', 'description' => 'Path to Amcache.hve. Relative to case dir.'],
+					'keyword'      => ['type' => 'string', 'description' => 'Filter entries whose path contains this keyword (case-insensitive).'],
+					'time_from'    => ['type' => 'string', 'description' => 'Only entries on or after this date (YYYY-MM-DD).'],
+				],
+				'required' => [],
+			],
+		];
+	}
+
+	protected function execute(Workspace $case, Config $config, array $params): AdapterResult
+	{
+		$sysHive  = isset($params['system_hive'])  ? $this->resolveFilePath($case, $params['system_hive'])  : '';
+		$amcHive  = isset($params['amcache_hive']) ? $this->resolveFilePath($case, $params['amcache_hive']) : '';
+		$keyword  = strtolower($params['keyword']  ?? '');
+		$timeFrom = $params['time_from'] ?? '';
+		if ($sysHive === '' && $amcHive === '') return $this->errorResult('Provide system_hive and/or amcache_hive.');
+		$ssh  = remnux_ssh($config);
+		$rd   = $config->remnuxWorkDir;
+		$ssh->run("mkdir -p '{$rd}'");
+		$results = [];
+		$ev      = [];
+
+		$runPlugin = function(string $hive, string $plugin, string $label) use ($ssh, $rd, $config, $case, $keyword, $timeFrom, &$ev): array {
+			$t  = SharedPath::ensureOnREMnux($hive, $config, $ssh, $rd);
+			$rh = $t['path'];
+			$ro = "{$rd}/{$label}_out.txt";
+			$ssh->run(
+				"if command -v rip.pl &>/dev/null; then rip.pl -r '{$rh}' -p {$plugin} > '{$ro}' 2>&1; " .
+				"elif command -v regripper &>/dev/null; then regripper -r '{$rh}' -p {$plugin} > '{$ro}' 2>&1; " .
+				"else echo NO_REGRIPPER > '{$ro}'; fi",
+				60
+			);
+			$lo = "{$case->derivedDir}/{$label}_" . pathinfo($hive, PATHINFO_FILENAME) . '.txt';
+			$ssh->copyFrom($ro, $lo);
+			$ssh->run("rm -f '{$ro}'");
+			if ($t['method'] === 'sftp') $ssh->run("rm -f '{$rh}'");
+			if (!file_exists($lo)) return [];
+			$lines   = file($lo, FILE_IGNORE_NEW_LINES) ?: [];
+			$entries = [];
+			foreach ($lines as $line) {
+				if (!preg_match('/(\d{4}-\d{2}-\d{2})/i', $line, $dm)) continue;
+				if ($timeFrom !== '' && $dm[1] < $timeFrom) continue;
+				if ($keyword  !== '' && !str_contains(strtolower($line), $keyword)) continue;
+				$hash = ''; if (preg_match('/[0-9a-f]{40}/i', $line, $hm)) $hash = $hm[0];
+				$entries[] = ['date' => $dm[1], 'hash' => $hash, 'line' => $line];
+				$ev[] = "{$label}:" . mb_substr($line, 0, 100);
+			}
+			return ['raw_lines' => count($lines), 'matched' => count($entries), 'entries' => array_slice($entries, 0, 100)];
+		};
+
+		if ($sysHive !== '' && file_exists($sysHive)) $results['shimcache'] = $runPlugin($sysHive, 'appcompatcache', 'shimcache');
+		if ($amcHive  !== '' && file_exists($amcHive))  $results['amcache']   = $runPlugin($amcHive,  'amcache',        'amcache');
+		$out = "{$case->derivedDir}/shimcache_amcache_" . time() . '.json';
+		$this->writeJson($out, $results);
+		return new AdapterResult(
+			adapterName:       self::NAME,
+			success:           !empty($results),
+			producedFiles:     [$out],
+			structuredResults: $results,
+			evidencePointers:  array_slice($ev, 0, 50),
+			stdoutExcerpt:     'ShimCache=' . ($results['shimcache']['matched'] ?? 'n/a') . ' Amcache=' . ($results['amcache']['matched'] ?? 'n/a') . ' matched',
+			stderrExcerpt:     '',
+			execResult:        new ExecResult(0, '', '', 0, "ssh:{$config->remnuxHost}", 'shimcache_amcache_parse'),
+		);
+	}
+}

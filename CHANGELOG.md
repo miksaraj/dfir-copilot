@@ -7,6 +7,42 @@ Versioning follows a modified SemVer scheme: `<year>-<major>.<minor>.<patch>`.
 
 ---
 
+## [2026-1.0.0] — 2026-03-26
+
+### Added
+
+- **`src/Adapters/ForensicAdapters.php`** — new adapter file (7 adapters) covering forensic speciality evidence types not addressed by previous tiers:
+  - **`email_parse`** — parse raw `.eml` files: full RFC-5321 Received-chain reconstruction (hop-by-hop originating IP extraction), SPF/DKIM/DMARC header inspection, MIME attachment enumeration (filename, content-type, size, SHA-256), embedded URL extraction, and full raw headers. Runs locally.
+  - **`git_diff_parse`** — parse unified diff / `git format-patch` files into structured hunks. Counts added/removed lines per file, extracts secret patterns (API keys, tokens, passwords, private key headers) from added lines, flags binary file changes. Runs locally.
+  - **`ci_log_parse`** — parse GitHub Actions log ZIP archives (percent-encoded filenames). Decodes and merges all step logs into a single searchable stream; searches for error keywords, secret leaks, artefact upload paths, and custom patterns. Handles ZIP-in-ZIP bundles (outer job ZIP → inner step ZIPs). Runs locally.
+  - **`pipeline_log_parse`** — parse CodeForge/custom CI pipeline evidence: `event_history.csv`, runner logs, and artefact manifests. Extracts build events, failure steps, artefact hashes, and runner metadata. Runs locally.
+  - **`lua_script_analyse`** — analyse a Lua-based implant bundle: `strings -n 6` extraction with IOC pattern matching, `conf.txt` C2 configuration parsing (key=value pairs flagging IP/host/port/key fields), and bytecode decompilation attempt via unluac/luadec on REMnux. Runs via REMnux SSH.
+  - **`lnk_and_jumplist_parse`** — parse Windows Shell Link (`.lnk`) files from a KAPE-extracted directory using an inline Python parser deployed to REMnux. Returns target paths, volume serial numbers, and creation/modification timestamps. Supports `date_filter` to narrow to a specific date. Runs via REMnux SSH.
+  - **`linux_artefact_parse`** — parse Linux forensic artefacts from a filesystem dump directory: `auth.log`/`secure` (SSH accepted logins, sudo commands), `bash_history` (last 200 commands per user, suspicious-command flagging), crontabs, non-standard systemd units (by ExecStart path), `authorized_keys` (per user), `/etc/passwd` (UID ≥ 1000), and `dpkg.log` (install events). Supports `time_from` filtering and extra keyword highlighting. Runs locally.
+
+- **`nexus_audit_log_parse`** (`CloudAdapters.php`) — parse Sonatype Nexus Repository Manager 3 request logs (Apache CLF format). Reconstructs component download events with source IP, datetime, HTTP method, URL path, status code, and bytes. Supports `artifact_filter`, `ip_filter`, `status_filter`, `exclude_ips`, and `time_from`. Returns top-N IP and path frequency tables — essential for supply-chain blast-radius assessment (which consumers downloaded the poisoned package and when).
+
+- **`lambda_invocation_parse`** (`CloudAdapters.php`) — parse AWS CloudWatch Lambda invocation CSV exports (Timestamp, Duration, BilledDuration, MaxMemoryUsed, InitDuration, ErrorType). Detects anomalous invocations using mean + 3σ outlier detection (or a configurable manual threshold), identifies cold-start events (new deployment indicator), aggregates error rates, and computes p50/p99 latency. Returns per-function summaries and the top anomalous invocations sorted by duration.
+
+- **`mft_parse`** (`DiskAdapters.php`) — parse a raw Windows `$MFT` binary file extracted by KAPE or similar triage tools. Unlike `mft_search` (which operates on E01 images via TSK), this adapter accepts the standalone binary and runs `analyzeMFT` (or `mftdump` as fallback) on REMnux to produce a CSV. Filters support `deleted_only` (in-use flag = 0), `timestomp_only` (`$STANDARD_INFORMATION` vs `$FILE_NAME` creation time skew > 10 s), `time_from`, and `keyword`. Returns statistics (total, deleted, timestomped counts) plus matched entries.
+
+- **`shimcache_amcache_parse`** (`DiskAdapters.php`) — extract Windows ShimCache (AppCompatCache from SYSTEM hive) and Amcache.hve execution artefacts using `rip.pl`/`regripper` on REMnux. Reveals execution history of deleted tools and one-shot lateral-movement utilities that left no prefetch entry. Supports `time_from` and `keyword` filters; extracts SHA-1 hashes from Amcache output lines.
+
+- **`evtx_bulk_query`** (`REMNuxAdapters.php`) — parse and correlate multiple Windows EVTX files simultaneously from a KAPE triage directory (30+ log channels). Transfers files to REMnux, runs `evtx_dump` per channel, and merges into a single chronological stream. Filters by `event_ids` (cross-channel), `username`, `process_name`, `keyword`, and time window. Returns event-ID frequency summary across all channels — essential for cross-channel attack chain reconstruction.
+
+- **`pcap_stream_extract`** (`REMNuxAdapters.php`) — extract and reassemble TCP/UDP stream payloads from a PCAP/PCAPNG via tshark on REMnux. Three modes:
+  - `http_objects` — exports all files transferred over HTTP using `tshark --export-objects`, computes SHA-256 of each object
+  - `stream_follow` — reassembles up to N TCP streams to ASCII text, extracts embedded URLs and hashes
+  - `beaconing` — analyses inter-packet timing per destination (coefficient of variation < 15%) to identify C2 heartbeat candidates
+
+### Changed
+
+- **`autoload.php`** — `ForensicAdapters.php` added to the eager-load list.
+- **`dfirbus.php`** — 13 new adapter classes imported and registered in `registerAllAdapters()` across Tiers 4–7.
+- **README** — Adapters section expanded with new Cloud Platform, Disk Forensics Extensions, REMnux Extensions, and Forensic Speciality tiers; project structure updated to reflect `ForensicAdapters.php`.
+
+---
+
 ## [2026-0.6.0] — 2026-03-26
 
 ### Added
@@ -208,6 +244,7 @@ Initial public release. End-to-end DFIR analysis orchestration from a single PHP
 
 ---
 
+[2026-1.0.0]: https://github.com/miksaraj/dfir-copilot/releases/tag/2026-1.0.0
 [2026-0.6.0]: https://github.com/miksaraj/dfir-copilot/releases/tag/v2026-0.6.0
 [2026-0.5.0]: https://github.com/miksaraj/dfir-copilot/releases/tag/v2026-0.5.0
 [2026-0.4.3]: https://github.com/miksaraj/dfir-copilot/releases/tag/2026-0.4.3

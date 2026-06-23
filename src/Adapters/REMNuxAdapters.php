@@ -64,12 +64,14 @@ final class StringsAndIOCs extends BaseAdapter
 		$ssh       = remnux_ssh($config);
 		$remoteDir = $config->remnuxWorkDir;
 
-		$transfer = SharedPath::ensureOnREMnux($fp, $config, $ssh, $remoteDir);
-		$remoteFp = $transfer['path'];
+		$transfer  = SharedPath::ensureOnREMnux($fp, $config, $ssh, $remoteDir);
+		$remoteFp  = $transfer['path'];
+		$remoteFpQ = escapeshellarg($remoteFp);
 
-		$remoteOut = "{$remoteDir}/" . pathinfo($fp, PATHINFO_FILENAME) . '_strings.txt';
+		$remoteOut  = "{$remoteDir}/" . pathinfo($fp, PATHINFO_FILENAME) . '_strings.txt';
+		$remoteOutQ = escapeshellarg($remoteOut);
 
-		$cmd    = "strings -n {$min} '{$remoteFp}' > '{$remoteOut}' && strings -n {$min} -el '{$remoteFp}' >> '{$remoteOut}'";
+		$cmd    = "strings -n {$min} {$remoteFpQ} > {$remoteOutQ} && strings -n {$min} -el {$remoteFpQ} >> {$remoteOutQ}";
 		$result = $ssh->run($cmd, 120);
 
 		$stem     = pathinfo($fp, PATHINFO_FILENAME);
@@ -77,9 +79,9 @@ final class StringsAndIOCs extends BaseAdapter
 		$ssh->copyFrom($remoteOut, $localOut);
 
 		if ($transfer['method'] === 'sftp') {
-			$ssh->run("rm -f '{$remoteFp}'");
+			$ssh->run("rm -f {$remoteFpQ}");
 		}
-		$ssh->run("rm -f '{$remoteOut}'");
+		$ssh->run("rm -f {$remoteOutQ}");
 
 		$lineCount = file_exists($localOut) ? count(file($localOut)) : 0;
 
@@ -144,13 +146,15 @@ final class YARAScan extends BaseAdapter
 		$ssh       = remnux_ssh($config);
 		$remoteDir = $config->remnuxWorkDir;
 
-		$transfer = SharedPath::ensureOnREMnux($fp, $config, $ssh, $remoteDir);
-		$remoteFp = $transfer['path'];
+		$transfer  = SharedPath::ensureOnREMnux($fp, $config, $ssh, $remoteDir);
+		$remoteFp  = $transfer['path'];
+		$remoteFpQ = escapeshellarg($remoteFp);
 
-		$remoteOut = "{$remoteDir}/" . pathinfo($fp, PATHINFO_FILENAME) . '_yara.txt';
-		$rulesPath = ($rule === 'all') ? '/usr/share/yara-rules' : "/usr/share/yara-rules/{$rule}";
-		$cmd       = "yara -r -s '{$rulesPath}' '{$remoteFp}' > '{$remoteOut}' 2>&1 || true";
-		$result    = $ssh->run($cmd, 180);
+		$remoteOut  = "{$remoteDir}/" . pathinfo($fp, PATHINFO_FILENAME) . '_yara.txt';
+		$remoteOutQ = escapeshellarg($remoteOut);
+		$rulesPath  = ($rule === 'all') ? '/usr/share/yara-rules' : "/usr/share/yara-rules/{$rule}";
+		$cmd        = "yara -r -s " . escapeshellarg($rulesPath) . " {$remoteFpQ} > {$remoteOutQ} 2>&1 || true";
+		$result     = $ssh->run($cmd, 180);
 
 		$stem    = pathinfo($fp, PATHINFO_FILENAME);
 		$rawOut  = "{$case->derivedDir}/{$stem}_yara_raw.txt";
@@ -158,9 +162,9 @@ final class YARAScan extends BaseAdapter
 		$ssh->copyFrom($remoteOut, $rawOut);
 
 		if ($transfer['method'] === 'sftp') {
-			$ssh->run("rm -f '{$remoteFp}'");
+			$ssh->run("rm -f {$remoteFpQ}");
 		}
-		$ssh->run("rm -f '{$remoteOut}'");
+		$ssh->run("rm -f {$remoteOutQ}");
 
 		$matches = [];
 		if (file_exists($rawOut)) {
@@ -224,10 +228,13 @@ final class CapaScan extends BaseAdapter
 
 		$transfer   = SharedPath::ensureOnREMnux($fp, $config, $ssh, $remoteDir);
 		$remoteFp   = $transfer['path'];
+		$remoteFpQ  = escapeshellarg($remoteFp);
 		$remoteJson = "{$remoteDir}/" . pathinfo($fp, PATHINFO_FILENAME) . '_capa.json';
 		$remoteTxt  = "{$remoteDir}/" . pathinfo($fp, PATHINFO_FILENAME) . '_capa.txt';
+		$remoteJsonQ = escapeshellarg($remoteJson);
+		$remoteTxtQ  = escapeshellarg($remoteTxt);
 
-		$cmd    = "capa -j '{$remoteFp}' > '{$remoteJson}' 2>/dev/null || capa '{$remoteFp}' > '{$remoteTxt}' 2>&1";
+		$cmd    = "capa -j {$remoteFpQ} > {$remoteJsonQ} 2>/dev/null || capa {$remoteFpQ} > {$remoteTxtQ} 2>&1";
 		$result = $ssh->run($cmd, 300);
 
 		$stem      = pathinfo($fp, PATHINFO_FILENAME);
@@ -237,9 +244,9 @@ final class CapaScan extends BaseAdapter
 		$ssh->copyFrom($remoteTxt, $localTxt);
 
 		if ($transfer['method'] === 'sftp') {
-			$ssh->run("rm -f '{$remoteFp}'");
+			$ssh->run("rm -f {$remoteFpQ}");
 		}
-		$ssh->run("rm -f '{$remoteJson}' '{$remoteTxt}'");
+		$ssh->run("rm -f {$remoteJsonQ} {$remoteTxtQ}");
 
 		$capabilities  = [];
 		$attackMappings = [];
@@ -345,9 +352,10 @@ final class Vol3Triage extends BaseAdapter
 		$ssh       = remnux_ssh($config);
 		$remoteDir = $config->remnuxWorkDir;
 
-		$ssh->run("mkdir -p {$remoteDir}");
-		$transfer = SharedPath::ensureOnREMnux($fp, $config, $ssh, $remoteDir);
-		$remoteFp = $transfer['path'];
+		$ssh->run("mkdir -p " . escapeshellarg($remoteDir));
+		$transfer  = SharedPath::ensureOnREMnux($fp, $config, $ssh, $remoteDir);
+		$remoteFp  = $transfer['path'];
+		$remoteFpQ = escapeshellarg($remoteFp);
 
 		$pluginResults = [];
 		$producedFiles = [];
@@ -355,10 +363,13 @@ final class Vol3Triage extends BaseAdapter
 
 		foreach ($plugins as $plugin) {
 			$short      = strtolower(array_slice(explode('.', $plugin), -1)[0]);
+			$pluginQ    = escapeshellarg($plugin);
 			$remoteJson = "{$remoteDir}/vol3_{$short}.json";
 			$remoteTxt  = "{$remoteDir}/vol3_{$short}.txt";
+			$remoteJsonQ = escapeshellarg($remoteJson);
+			$remoteTxtQ  = escapeshellarg($remoteTxt);
 
-			$cmd = "vol -f '{$remoteFp}' -r json {$plugin} > '{$remoteJson}' 2>/dev/null || vol -f '{$remoteFp}' {$plugin} > '{$remoteTxt}' 2>&1";
+			$cmd = "vol -f {$remoteFpQ} -r json {$pluginQ} > {$remoteJsonQ} 2>/dev/null || vol -f {$remoteFpQ} {$pluginQ} > {$remoteTxtQ} 2>&1";
 			$ssh->run($cmd, 300);
 
 			$localJson = "{$case->derivedDir}/vol3_{$short}.json";
@@ -388,7 +399,7 @@ final class Vol3Triage extends BaseAdapter
 		$ssh->run("rm -f {$remoteDir}/vol3_*.json {$remoteDir}/vol3_*.txt");
 
 		if ($transfer['method'] === 'sftp') {
-			$ssh->run("rm -f '{$remoteFp}'");
+			$ssh->run("rm -f {$remoteFpQ}");
 		}
 
 		return new AdapterResult(
@@ -441,27 +452,30 @@ final class TimelineBuild extends BaseAdapter
 		$ssh       = remnux_ssh($config);
 		$remoteDir = $config->remnuxWorkDir;
 
-		$ssh->run("mkdir -p {$remoteDir}");
-		$transfer = SharedPath::ensureOnREMnux($fp, $config, $ssh, $remoteDir);
-		$remoteFp = $transfer['path'];
+		$ssh->run("mkdir -p " . escapeshellarg($remoteDir));
+		$transfer  = SharedPath::ensureOnREMnux($fp, $config, $ssh, $remoteDir);
+		$remoteFp  = $transfer['path'];
+		$remoteFpQ = escapeshellarg($remoteFp);
 
-		$plasoDb   = "{$remoteDir}/timeline.plaso";
-		$remoteOut = "{$remoteDir}/timeline.{$format}";
+		$plasoDb    = "{$remoteDir}/timeline.plaso";
+		$remoteOut  = "{$remoteDir}/timeline.{$format}";
+		$plasoDbQ   = escapeshellarg($plasoDb);
+		$remoteOutQ = escapeshellarg($remoteOut);
 
-		$resultL2t = $ssh->run("log2timeline.py --status_view none '{$plasoDb}' '{$remoteFp}' 2>&1", 600);
+		$resultL2t = $ssh->run("log2timeline.py --status_view none {$plasoDbQ} {$remoteFpQ} 2>&1", 600);
 
 		$exportCmd = ($format === 'csv')
-			? "psort.py -o l2tcsv -w '{$remoteOut}' '{$plasoDb}' 2>&1"
-			: "psort.py -o json_line -w '{$remoteOut}' '{$plasoDb}' 2>&1";
+			? "psort.py -o l2tcsv -w {$remoteOutQ} {$plasoDbQ} 2>&1"
+			: "psort.py -o json_line -w {$remoteOutQ} {$plasoDbQ} 2>&1";
 		$resultExport = $ssh->run($exportCmd, 300);
 
 		$localOut = "{$case->timelinesDir}/timeline.{$format}";
 		$ssh->copyFrom($remoteOut, $localOut);
 
 		if ($transfer['method'] === 'sftp') {
-			$ssh->run("rm -f '{$remoteFp}'");
+			$ssh->run("rm -f {$remoteFpQ}");
 		}
-		$ssh->run("rm -f '{$plasoDb}' '{$remoteOut}'");
+		$ssh->run("rm -f {$plasoDbQ} {$remoteOutQ}");
 
 		$lineCount = file_exists($localOut) ? count(file($localOut)) : 0;
 
@@ -519,9 +533,10 @@ final class PCAPSummary extends BaseAdapter
 		$ssh       = remnux_ssh($config);
 		$remoteDir = $config->remnuxWorkDir;
 
-		$ssh->run("mkdir -p {$remoteDir}");
-		$transfer = SharedPath::ensureOnREMnux($fp, $config, $ssh, $remoteDir);
-		$remoteFp = $transfer['path'];
+		$ssh->run("mkdir -p " . escapeshellarg($remoteDir));
+		$transfer  = SharedPath::ensureOnREMnux($fp, $config, $ssh, $remoteDir);
+		$remoteFp  = $transfer['path'];
+		$remoteFpQ = escapeshellarg($remoteFp);
 
 		// Transfer keylog file if provided
 		$remoteKeylog = '';
@@ -531,39 +546,39 @@ final class PCAPSummary extends BaseAdapter
 		}
 
 		// Build tshark options
-		$tlsOpt = $remoteKeylog !== '' ? "-o tls.keylog_file:{$remoteKeylog}" : '';
+		$tlsOpt = $remoteKeylog !== '' ? "-o tls.keylog_file:" . escapeshellarg($remoteKeylog) : '';
 
 		$results = [];
 
-		$r = $ssh->run("tshark -r '{$remoteFp}' {$tlsOpt} -q -z conv,tcp 2>/dev/null | head -100");
+		$r = $ssh->run("tshark -r {$remoteFpQ} {$tlsOpt} -q -z conv,tcp 2>/dev/null | head -100");
 		$results['tcp_conversations'] = $r->stdout;
 
-		$r = $ssh->run("tshark -r '{$remoteFp}' {$tlsOpt} -Y 'dns.qry.name' -T fields -e dns.qry.name 2>/dev/null | sort -u");
+		$r = $ssh->run("tshark -r {$remoteFpQ} {$tlsOpt} -Y 'dns.qry.name' -T fields -e dns.qry.name 2>/dev/null | sort -u");
 		$results['dns_queries'] = array_filter(explode("\n", trim($r->stdout)));
 
-		$r = $ssh->run("tshark -r '{$remoteFp}' {$tlsOpt} -Y 'http.request' -T fields -e http.host -e http.request.uri 2>/dev/null | head -50");
+		$r = $ssh->run("tshark -r {$remoteFpQ} {$tlsOpt} -Y 'http.request' -T fields -e http.host -e http.request.uri 2>/dev/null | head -50");
 		$results['http_requests'] = $r->stdout;
 
-		$r = $ssh->run("tshark -r '{$remoteFp}' {$tlsOpt} -Y 'tls.handshake.extensions_server_name' -T fields -e tls.handshake.extensions_server_name 2>/dev/null | sort -u");
+		$r = $ssh->run("tshark -r {$remoteFpQ} {$tlsOpt} -Y 'tls.handshake.extensions_server_name' -T fields -e tls.handshake.extensions_server_name 2>/dev/null | sort -u");
 		$results['tls_sni'] = array_filter(explode("\n", trim($r->stdout)));
 
 		// If keylog provided, also extract decrypted HTTP/2 traffic
 		if ($remoteKeylog !== '') {
-			$r = $ssh->run("tshark -r '{$remoteFp}' {$tlsOpt} -Y 'http2.headers' -T fields -e http2.headers.authority -e http2.headers.path 2>/dev/null | head -50");
+			$r = $ssh->run("tshark -r {$remoteFpQ} {$tlsOpt} -Y 'http2.headers' -T fields -e http2.headers.authority -e http2.headers.path 2>/dev/null | head -50");
 			$results['http2_requests'] = $r->stdout;
 
 			$results['tls_decryption'] = 'enabled';
 		}
 
-		$r = $ssh->run("capinfos '{$remoteFp}' 2>/dev/null");
+		$r = $ssh->run("capinfos {$remoteFpQ} 2>/dev/null");
 		$results['pcap_info'] = $r->stdout;
 
 		// Cleanup
 		if ($transfer['method'] === 'sftp') {
-			$ssh->run("rm -f '{$remoteFp}'");
+			$ssh->run("rm -f {$remoteFpQ}");
 		}
 		if ($remoteKeylog !== '' && $klTransfer['method'] === 'sftp') {
-			$ssh->run("rm -f '{$remoteKeylog}'");
+			$ssh->run("rm -f " . escapeshellarg($remoteKeylog));
 		}
 
 		$stem    = pathinfo($fp, PATHINFO_FILENAME);
@@ -679,22 +694,24 @@ final class InjectPdfRead extends BaseAdapter
 			try {
 				$ssh       = remnux_ssh($config);
 				$remoteDir = $config->remnuxWorkDir;
-				$ssh->run("mkdir -p {$remoteDir}");
+				$ssh->run("mkdir -p " . escapeshellarg($remoteDir));
 
-				$transfer  = SharedPath::ensureOnREMnux($fp, $config, $ssh, $remoteDir);
-				$remoteFp  = $transfer['path'];
-				$remoteOut = "{$remoteDir}/{$stem}_text.txt";
+				$transfer   = SharedPath::ensureOnREMnux($fp, $config, $ssh, $remoteDir);
+				$remoteFp   = $transfer['path'];
+				$remoteFpQ  = escapeshellarg($remoteFp);
+				$remoteOut  = "{$remoteDir}/{$stem}_text.txt";
+				$remoteOutQ = escapeshellarg($remoteOut);
 
 				// Run both attempts while the remote file is still present,
 				// then clean up — the original code deleted first, then fell
 				// back, which caused "file not found" on the second attempt.
-				$r1 = $ssh->run("pdftotext -layout '{$remoteFp}' '{$remoteOut}' 2>&1", 30);
+				$r1 = $ssh->run("pdftotext -layout {$remoteFpQ} {$remoteOutQ} 2>&1", 30);
 				$ssh->copyFrom($remoteOut, $localOut);
 				$text   = file_exists($localOut) ? trim(file_get_contents($localOut)) : '';
 				$stderr = $r1->stderr;
 
 				if ($text === '') {
-					$r2   = $ssh->run("pdftotext '{$remoteFp}' - 2>/dev/null", 30);
+					$r2   = $ssh->run("pdftotext {$remoteFpQ} - 2>/dev/null", 30);
 					$text = trim($r2->stdout);
 					if ($text !== '') {
 						file_put_contents($localOut, $text);
@@ -702,9 +719,9 @@ final class InjectPdfRead extends BaseAdapter
 				}
 
 				// Cleanup now that both attempts are done
-				$ssh->run("rm -f '{$remoteOut}'");
+				$ssh->run("rm -f {$remoteOutQ}");
 				if ($transfer['method'] === 'sftp') {
-					$ssh->run("rm -f '{$remoteFp}'");
+					$ssh->run("rm -f {$remoteFpQ}");
 				}
 
 				$method = "ssh:{$config->remnuxHost}";
@@ -838,22 +855,30 @@ final class EvtxParse extends BaseAdapter
 		$stem       = pathinfo($fp, PATHINFO_FILENAME);
 		$remoteJson = "{$remoteDir}/{$stem}_evtx.json";
 
+		// Pass the (potentially attacker-influenced) filenames in via env vars
+		// rather than interpolating them into the bash/Python source directly —
+		// the script below embeds the path inside a Python string literal as
+		// well as a bash command, and env vars sidestep both quoting contexts.
+		$envPrefix = "EVTX_REMOTE_FP=" . escapeshellarg($remoteFp)
+			. " EVTX_REMOTE_JSON=" . escapeshellarg($remoteJson) . " ";
+
 		// Try evtx_dump (Rust, fast) first, fall back to python-evtx
-		$cmd = <<<BASH
+		$cmd = $envPrefix . <<<'BASH'
 if command -v evtx_dump &>/dev/null; then
-  evtx_dump -o jsonl '{$remoteFp}' > '{$remoteJson}' 2>/dev/null
+  evtx_dump -o jsonl "$EVTX_REMOTE_FP" > "$EVTX_REMOTE_JSON" 2>/dev/null
 elif python3 -c "import Evtx" 2>/dev/null; then
   python3 -c "
+import os
 import Evtx.Evtx as evtx
 import json, sys
-with evtx.Evtx('{$remoteFp}') as log:
+with evtx.Evtx(os.environ['EVTX_REMOTE_FP']) as log:
   for record in log.records():
     try:
       print(json.dumps({'EventRecordID': record.record_num(), 'xml': record.xml()}))
     except: pass
-" > '{$remoteJson}' 2>/dev/null
+" > "$EVTX_REMOTE_JSON" 2>/dev/null
 else
-  echo 'NO_EVTX_TOOL' > '{$remoteJson}'
+  echo 'NO_EVTX_TOOL' > "$EVTX_REMOTE_JSON"
 fi
 BASH;
 
@@ -863,9 +888,9 @@ BASH;
 		$ssh->copyFrom($remoteJson, $localJson);
 
 		if ($transfer['method'] === 'sftp') {
-			$ssh->run("rm -f '{$remoteFp}'");
+			$ssh->run("rm -f " . escapeshellarg($remoteFp));
 		}
-		$ssh->run("rm -f '{$remoteJson}'");
+		$ssh->run("rm -f " . escapeshellarg($remoteJson));
 
 		// Parse events
 		$events     = [];
@@ -981,27 +1006,29 @@ final class PcapFilter extends BaseAdapter
 
 		$ssh       = remnux_ssh($config);
 		$remoteDir = $config->remnuxWorkDir;
-		$ssh->run("mkdir -p '{$remoteDir}'");
+		$ssh->run("mkdir -p " . escapeshellarg($remoteDir));
 		$transfer  = SharedPath::ensureOnREMnux($fp, $config, $ssh, $remoteDir);
 		$remoteFp  = $transfer['path'];
+		$remoteFpQ = escapeshellarg($remoteFp);
 
 		if (empty($fields)) {
 			$fields = ['frame.time', 'ip.src', 'ip.dst', '_ws.col.Info'];
 		}
 
-		$fieldArgs = implode(' ', array_map(fn($f) => '-e ' . escapeshellarg($f), $fields));
-		$remoteOut = "{$remoteDir}/pcap_filter_out.txt";
+		$fieldArgs  = implode(' ', array_map(fn($f) => '-e ' . escapeshellarg($f), $fields));
+		$remoteOut  = "{$remoteDir}/pcap_filter_out.txt";
+		$remoteOutQ = escapeshellarg($remoteOut);
 		$r = $ssh->run(
-"tshark -r '{$remoteFp}' -Y " . escapeshellarg($filter)
-. " -T fields {$fieldArgs} -E separator='|' -c {$maxPackets} > '{$remoteOut}' 2>/dev/null",
+"tshark -r {$remoteFpQ} -Y " . escapeshellarg($filter)
+. " -T fields {$fieldArgs} -E separator='|' -c {$maxPackets} > {$remoteOutQ} 2>/dev/null",
 120,
 );
 
 		$stem     = pathinfo($fp, PATHINFO_FILENAME);
 		$localOut = "{$case->derivedDir}/{$stem}_filtered.txt";
 		$ssh->copyFrom($remoteOut, $localOut);
-		$ssh->run("rm -f '{$remoteOut}'");
-		if ($transfer['method'] === 'sftp') $ssh->run("rm -f '{$remoteFp}'");
+		$ssh->run("rm -f {$remoteOutQ}");
+		if ($transfer['method'] === 'sftp') $ssh->run("rm -f {$remoteFpQ}");
 
 		$lines   = array_filter(array_map('trim', explode("\n", file_exists($localOut) ? file_get_contents($localOut) : '')));
 		$count   = count($lines);
@@ -1065,18 +1092,20 @@ final class PcapCarve extends BaseAdapter
 
 		$ssh       = remnux_ssh($config);
 		$remoteDir = $config->remnuxWorkDir;
-		$ssh->run("mkdir -p '{$remoteDir}'");
+		$ssh->run("mkdir -p " . escapeshellarg($remoteDir));
 		$transfer  = SharedPath::ensureOnREMnux($fp, $config, $ssh, $remoteDir);
 		$remoteFp  = $transfer['path'];
+		$remoteFpQ = escapeshellarg($remoteFp);
 
-		$carveDir = "{$remoteDir}/pcap_carve_out";
-		$ssh->run("mkdir -p '{$carveDir}'");
+		$carveDir  = "{$remoteDir}/pcap_carve_out";
+		$carveDirQ = escapeshellarg($carveDir);
+		$ssh->run("mkdir -p {$carveDirQ}");
 
 		$bpfArg = $bpf !== '' ? escapeshellarg($bpf) : '';
-		$r = $ssh->run("tcpflow -r '{$remoteFp}' -o '{$carveDir}' {$bpfArg} 2>/dev/null", 300);
+		$r = $ssh->run("tcpflow -r {$remoteFpQ} -o {$carveDirQ} {$bpfArg} 2>/dev/null", 300);
 
 		$listR = $ssh->run(
-"find '{$carveDir}' -type f ! -name '*.html' ! -name 'report*' | head -100"
+"find {$carveDirQ} -type f ! -name '*.html' ! -name 'report*' | head -100"
 . " | while read f; do sz=\$(stat -c%s \"\$f\" 2>/dev/null||echo 0); mg=\$(file -b \"\$f\" 2>/dev/null|head -c80); echo \"\$sz|\$mg|\$f\"; done",
 60,
 );
@@ -1105,8 +1134,8 @@ final class PcapCarve extends BaseAdapter
 			}
 		}
 
-		$ssh->run("rm -rf '{$carveDir}'");
-		if ($transfer['method'] === 'sftp') $ssh->run("rm -f '{$remoteFp}'");
+		$ssh->run("rm -rf {$carveDirQ}");
+		if ($transfer['method'] === 'sftp') $ssh->run("rm -f {$remoteFpQ}");
 
 		$outJson = "{$case->derivedDir}/{$stem}_pcap_carved.json";
 		$this->writeJson($outJson, $carved);
@@ -1157,20 +1186,22 @@ final class OletoolsAnalyze extends BaseAdapter
 
 		$ssh       = remnux_ssh($config);
 		$remoteDir = $config->remnuxWorkDir;
-		$ssh->run("mkdir -p '{$remoteDir}'");
+		$ssh->run("mkdir -p " . escapeshellarg($remoteDir));
 		$transfer  = SharedPath::ensureOnREMnux($fp, $config, $ssh, $remoteDir);
 		$remoteFp  = $transfer['path'];
+		$remoteFpQ = escapeshellarg($remoteFp);
 
-		$stem      = pathinfo($fp, PATHINFO_FILENAME);
-		$remoteOut = "{$remoteDir}/olevba_out.txt";
+		$stem       = pathinfo($fp, PATHINFO_FILENAME);
+		$remoteOut  = "{$remoteDir}/olevba_out.txt";
+		$remoteOutQ = escapeshellarg($remoteOut);
 
-		$rOle  = $ssh->run("olevba --json '{$remoteFp}' > '{$remoteOut}' 2>/dev/null || olevba '{$remoteFp}' > '{$remoteOut}' 2>&1", 120);
-		$rMrap = $ssh->run("mraptor '{$remoteFp}' 2>/dev/null", 60);
+		$rOle  = $ssh->run("olevba --json {$remoteFpQ} > {$remoteOutQ} 2>/dev/null || olevba {$remoteFpQ} > {$remoteOutQ} 2>&1", 120);
+		$rMrap = $ssh->run("mraptor {$remoteFpQ} 2>/dev/null", 60);
 
 		$localOle = "{$case->derivedDir}/{$stem}_olevba.txt";
 		$ssh->copyFrom($remoteOut, $localOle);
-		$ssh->run("rm -f '{$remoteOut}'");
-		if ($transfer['method'] === 'sftp') $ssh->run("rm -f '{$remoteFp}'");
+		$ssh->run("rm -f {$remoteOutQ}");
+		if ($transfer['method'] === 'sftp') $ssh->run("rm -f {$remoteFpQ}");
 
 		$raw  = file_exists($localOle) ? file_get_contents($localOle) : '';
 		$data = json_decode($raw, true);
@@ -1354,12 +1385,14 @@ BASH, 180);
 				$stem  = pathinfo($lf, PATHINFO_FILENAME);
 				$t     = SharedPath::ensureOnREMnux($lf, $config, $ssh, $rdir);
 				$rPath = $t['path'];
+				$rPathQ = escapeshellarg($rPath);
 				$rJ    = "{$rdir}/{$stem}_tmp.json";
-				$ssh->run("if command -v evtx_dump &>/dev/null; then evtx_dump -o jsonl '{$rPath}' > '{$rJ}' 2>/dev/null; fi", 60);
+				$rJQ   = escapeshellarg($rJ);
+				$ssh->run("if command -v evtx_dump &>/dev/null; then evtx_dump -o jsonl {$rPathQ} > {$rJQ} 2>/dev/null; fi", 60);
 				$lJ = "{$case->derivedDir}/{$stem}_tmp.json";
 				$ssh->copyFrom($rJ, $lJ);
-				$ssh->run("rm -f '{$rJ}'");
-				if ($t['method'] === 'sftp') $ssh->run("rm -f '{$rPath}'");
+				$ssh->run("rm -f {$rJQ}");
+				if ($t['method'] === 'sftp') $ssh->run("rm -f {$rPathQ}");
 				if (file_exists($lJ)) {
 					foreach (file($lJ, FILE_IGNORE_NEW_LINES) ?: [] as $line) {
 						$r = json_decode($line, true);
@@ -1487,9 +1520,10 @@ final class PcapStreamExtract extends BaseAdapter
 
 		$ssh  = remnux_ssh($config);
 		$rdir = $config->remnuxWorkDir;
-		$ssh->run("mkdir -p '{$rdir}'");
+		$ssh->run("mkdir -p " . escapeshellarg($rdir));
 		$transfer = SharedPath::ensureOnREMnux($pcapPath, $config, $ssh, $rdir);
 		$rPcap    = $transfer['path'];
+		$rPcapQ   = escapeshellarg($rPcap);
 		$stem     = pathinfo($pcapPath, PATHINFO_FILENAME);
 
 		$results  = []; $evidence = []; $producedFiles = [];
@@ -1497,12 +1531,13 @@ final class PcapStreamExtract extends BaseAdapter
 
 		if ($mode === 'http_objects') {
 			// Export HTTP objects (transferred files) to a temp dir
-			$rObjDir = "{$rdir}/http_objects_{$stem}";
-			$ssh->run("mkdir -p '{$rObjDir}'");
-			$r = $ssh->run("tshark -r '{$rPcap}'{$filterArg} --export-objects 'http,{$rObjDir}' 2>/dev/null", 120);
+			$rObjDir  = "{$rdir}/http_objects_{$stem}";
+			$rObjDirQ = escapeshellarg($rObjDir);
+			$ssh->run("mkdir -p {$rObjDirQ}");
+			$r = $ssh->run("tshark -r {$rPcapQ}{$filterArg} --export-objects " . escapeshellarg("http,{$rObjDir}") . " 2>/dev/null", 120);
 
 			// List exported objects
-			$listing = $ssh->run("ls -la '{$rObjDir}' 2>/dev/null");
+			$listing = $ssh->run("ls -la {$rObjDirQ} 2>/dev/null");
 			$objects = [];
 			foreach (explode("\n", $listing->stdout) as $line) {
 				if (preg_match('/(\d+)\s+(\S+.*)$/', $line, $m)) {
@@ -1517,18 +1552,19 @@ final class PcapStreamExtract extends BaseAdapter
 					}
 				}
 			}
-			$ssh->run("rm -rf '{$rObjDir}'");
+			$ssh->run("rm -rf {$rObjDirQ}");
 			$results = ['mode' => 'http_objects', 'objects_exported' => count($objects), 'objects' => $objects];
 
 		} elseif ($mode === 'stream_follow') {
 			$streams  = [];
-			$idxRange = $streamIdx !== null ? [$streamIdx] : range(0, $maxStreams - 1);
+			$idxRange = $streamIdx !== null ? [(int) $streamIdx] : range(0, $maxStreams - 1);
 			foreach ($idxRange as $idx) {
-				$rOut = "{$rdir}/stream_{$idx}.txt";
-				$r    = $ssh->run("tshark -r '{$rPcap}'{$filterArg} -q -z 'follow,tcp,ascii,{$idx}' 2>/dev/null | head -300 > '{$rOut}' 2>/dev/null", 60);
+				$rOut  = "{$rdir}/stream_{$idx}.txt";
+				$rOutQ = escapeshellarg($rOut);
+				$r    = $ssh->run("tshark -r {$rPcapQ}{$filterArg} -q -z " . escapeshellarg("follow,tcp,ascii,{$idx}") . " 2>/dev/null | head -300 > {$rOutQ} 2>/dev/null", 60);
 				$lOut = "{$case->derivedDir}/{$stem}_stream_{$idx}.txt";
 				$ssh->copyFrom($rOut, $lOut);
-				$ssh->run("rm -f '{$rOut}'");
+				$ssh->run("rm -f {$rOutQ}");
 				if (file_exists($lOut) && filesize($lOut) > 50) {
 					$content   = mb_substr(file_get_contents($lOut), 0, 8000);
 					$streams[] = ['stream_index' => $idx, 'content_preview' => $content];
@@ -1542,10 +1578,11 @@ final class PcapStreamExtract extends BaseAdapter
 
 		} elseif ($mode === 'beaconing') {
 			// Analyse inter-packet timing per destination — detect regular C2 heartbeats
-			$rOut = "{$rdir}/beacon_analysis.txt";
-			$ssh->run("tshark -r '{$rPcap}'{$filterArg} -T fields -e frame.time_epoch -e ip.dst -e tcp.dstport -E separator='|' 2>/dev/null | sort > '{$rOut}'", 90);
+			$rOut  = "{$rdir}/beacon_analysis.txt";
+			$rOutQ = escapeshellarg($rOut);
+			$ssh->run("tshark -r {$rPcapQ}{$filterArg} -T fields -e frame.time_epoch -e ip.dst -e tcp.dstport -E separator='|' 2>/dev/null | sort > {$rOutQ}", 90);
 			$lOut = "{$case->derivedDir}/{$stem}_beaconing.txt";
-			$ssh->copyFrom($rOut, $lOut); $ssh->run("rm -f '{$rOut}'");
+			$ssh->copyFrom($rOut, $lOut); $ssh->run("rm -f {$rOutQ}");
 
 			$intervals = [];
 			if (file_exists($lOut)) {
@@ -1574,7 +1611,7 @@ final class PcapStreamExtract extends BaseAdapter
 			$results = ['mode' => 'beaconing', 'beacon_candidates' => count($intervals), 'candidates' => array_slice($intervals, 0, 20)];
 		}
 
-		if ($transfer['method'] === 'sftp') $ssh->run("rm -f '{$rPcap}'");
+		if ($transfer['method'] === 'sftp') $ssh->run("rm -f {$rPcapQ}");
 
 		$outJson = "{$case->derivedDir}/pcap_stream_{$mode}_{$stem}.json";
 		$this->writeJson($outJson, $results);

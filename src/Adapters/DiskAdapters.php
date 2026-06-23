@@ -24,7 +24,7 @@ function disk_detect_partition(SSHExecutor $ssh, string $remoteFp): array
 	$ext     = strtolower(pathinfo($remoteFp, PATHINFO_EXTENSION));
 	$ewfFlag = in_array($ext, ['e01', 'ex01', 'l01', 'lx01'], true) ? '-i ewf' : '';
 
-	$r    = $ssh->run("mmls {$ewfFlag} '{$remoteFp}' 2>&1");
+	$r    = $ssh->run("mmls {$ewfFlag} " . escapeshellarg($remoteFp) . " 2>&1");
 	$ntfs = [];
 	$any  = [];
 
@@ -108,38 +108,41 @@ final class DiskTimeline extends BaseAdapter
 
 		$ssh       = disk_ssh($config);
 		$remoteDir = $config->remnuxWorkDir;
-		$ssh->run("mkdir -p '{$remoteDir}'");
+		$ssh->run("mkdir -p " . escapeshellarg($remoteDir));
 
-		$transfer = SharedPath::ensureOnREMnux($fp, $config, $ssh, $remoteDir);
-		$remoteFp = $transfer['path'];
+		$transfer  = SharedPath::ensureOnREMnux($fp, $config, $ssh, $remoteDir);
+		$remoteFp  = $transfer['path'];
+		$remoteFpQ = escapeshellarg($remoteFp);
 
 		$part    = disk_detect_partition($ssh, $remoteFp);
 		$offset  = $manualOffset ?? $part['offset'];
 		$ewfFlag = $part['ewf_flag'];
 
-		$bodyfile = "{$remoteDir}/dfircop_body.txt";
-		$tlOut    = "{$remoteDir}/dfircop_tl.csv";
+		$bodyfile  = "{$remoteDir}/dfircop_body.txt";
+		$tlOut     = "{$remoteDir}/dfircop_tl.csv";
+		$bodyfileQ = escapeshellarg($bodyfile);
+		$tlOutQ    = escapeshellarg($tlOut);
 
 		// Build bodyfile — can take many minutes on large images
 		$ssh->run(
-			"fls -r -m '/' {$ewfFlag} -f ntfs -o {$offset} '{$remoteFp}' > '{$bodyfile}' 2>/dev/null",
+			"fls -r -m '/' {$ewfFlag} -f ntfs -o {$offset} {$remoteFpQ} > {$bodyfileQ} 2>/dev/null",
 			1800,
 		);
 
 		// Mactime filter
 		if ($dateFilter !== '' && preg_match('/^\d{4}-\d{2}-\d{2}$/', $dateFilter)) {
-			$mac = $ssh->run("mactime -b '{$bodyfile}' -d {$dateFilter} 2>/dev/null | sort", 300);
+			$mac = $ssh->run("mactime -b {$bodyfileQ} -d {$dateFilter} 2>/dev/null | sort", 300);
 		} else {
-			$mac = $ssh->run("mactime -b '{$bodyfile}' 2>/dev/null | sort | head -5000", 300);
+			$mac = $ssh->run("mactime -b {$bodyfileQ} 2>/dev/null | sort | head -5000", 300);
 		}
 
 		// Write and retrieve
-		$ssh->run("printf '%s' " . escapeshellarg($mac->stdout) . " > '{$tlOut}'");
+		$ssh->run("printf '%s' " . escapeshellarg($mac->stdout) . " > {$tlOutQ}");
 		$suffix   = $dateFilter !== '' ? "_{$dateFilter}" : '';
 		$localOut = "{$case->derivedDir}/disk_timeline{$suffix}.csv";
 		$ssh->copyFrom($tlOut, $localOut);
-		$ssh->run("rm -f '{$bodyfile}' '{$tlOut}'");
-		if ($transfer['method'] === 'sftp') $ssh->run("rm -f '{$remoteFp}'");
+		$ssh->run("rm -f {$bodyfileQ} {$tlOutQ}");
+		if ($transfer['method'] === 'sftp') $ssh->run("rm -f {$remoteFpQ}");
 
 		$content = file_exists($localOut) ? file_get_contents($localOut) : '';
 		$lines   = array_filter(explode("\n", $content));
@@ -219,21 +222,22 @@ final class MftSearch extends BaseAdapter
 
 		$ssh       = disk_ssh($config);
 		$remoteDir = $config->remnuxWorkDir;
-		$ssh->run("mkdir -p '{$remoteDir}'");
+		$ssh->run("mkdir -p " . escapeshellarg($remoteDir));
 
-		$transfer = SharedPath::ensureOnREMnux($fp, $config, $ssh, $remoteDir);
-		$remoteFp = $transfer['path'];
+		$transfer  = SharedPath::ensureOnREMnux($fp, $config, $ssh, $remoteDir);
+		$remoteFp  = $transfer['path'];
+		$remoteFpQ = escapeshellarg($remoteFp);
 
 		$part    = disk_detect_partition($ssh, $remoteFp);
 		$offset  = $manualOffset ?? $part['offset'];
 		$ewfFlag = $part['ewf_flag'];
 
 		$r = $ssh->run(
-			"fls -r {$ewfFlag} -o {$offset} '{$remoteFp}' 2>/dev/null | grep -i " . escapeshellarg($pattern) . " | head -500",
+			"fls -r {$ewfFlag} -o {$offset} {$remoteFpQ} 2>/dev/null | grep -i " . escapeshellarg($pattern) . " | head -500",
 			900,
 		);
 
-		if ($transfer['method'] === 'sftp') $ssh->run("rm -f '{$remoteFp}'");
+		if ($transfer['method'] === 'sftp') $ssh->run("rm -f {$remoteFpQ}");
 
 		$rawLines = array_filter(array_map('trim', explode("\n", $r->stdout)));
 		$entries  = [];
@@ -345,7 +349,7 @@ final class RegistryParse extends BaseAdapter
 
 		$ssh       = disk_ssh($config);
 		$remoteDir = $config->remnuxWorkDir;
-		$ssh->run("mkdir -p '{$remoteDir}'");
+		$ssh->run("mkdir -p " . escapeshellarg($remoteDir));
 
 		// ── Path A: direct hive file provided ────────────────────
 		if ($rawHive !== '' && file_exists($rawHive)) {
@@ -355,8 +359,9 @@ final class RegistryParse extends BaseAdapter
 		// ── Path B: extract from disk image ──────────────────────
 		if (!file_exists($imgPath)) return $this->errorResult("Image not found: {$imgPath}");
 
-		$transfer = SharedPath::ensureOnREMnux($imgPath, $config, $ssh, $remoteDir);
-		$remoteFp = $transfer['path'];
+		$transfer  = SharedPath::ensureOnREMnux($imgPath, $config, $ssh, $remoteDir);
+		$remoteFp  = $transfer['path'];
+		$remoteFpQ = escapeshellarg($remoteFp);
 
 		$part    = disk_detect_partition($ssh, $remoteFp);
 		$offset  = isset($params['partition_offset']) ? (int) $params['partition_offset'] : $part['offset'];
@@ -373,7 +378,7 @@ final class RegistryParse extends BaseAdapter
 
 			// Find inode(s)
 			$r = $ssh->run(
-				"fls -r {$ewfFlag} -o {$offset} '{$remoteFp}' 2>/dev/null | grep -E " . escapeshellarg($grepPattern),
+				"fls -r {$ewfFlag} -o {$offset} {$remoteFpQ} 2>/dev/null | grep -E " . escapeshellarg($grepPattern),
 				900,
 			);
 
@@ -383,12 +388,13 @@ final class RegistryParse extends BaseAdapter
 				$filePath = trim($m[2]);
 				$basename = basename($filePath);
 
-				$remoteHive = "{$remoteDir}/reg_{$basename}";
-				$ssh->run("icat {$ewfFlag} -o {$offset} '{$remoteFp}' {$inode} > '{$remoteHive}' 2>/dev/null", 60);
+				$remoteHive  = "{$remoteDir}/reg_{$basename}";
+				$remoteHiveQ = escapeshellarg($remoteHive);
+				$ssh->run("icat {$ewfFlag} -o {$offset} {$remoteFpQ} {$inode} > {$remoteHiveQ} 2>/dev/null", 60);
 
 				$localHive = "{$case->derivedDir}/reg_{$basename}";
 				$ssh->copyFrom($remoteHive, $localHive);
-				$ssh->run("rm -f '{$remoteHive}'");
+				$ssh->run("rm -f {$remoteHiveQ}");
 
 				if (!file_exists($localHive) || filesize($localHive) === 0) continue;
 
@@ -399,7 +405,7 @@ final class RegistryParse extends BaseAdapter
 			}
 		}
 
-		if ($transfer['method'] === 'sftp') $ssh->run("rm -f '{$remoteFp}'");
+		if ($transfer['method'] === 'sftp') $ssh->run("rm -f {$remoteFpQ}");
 
 		$summary = "Parsed " . count($allResults) . " hive(s): " . implode(', ', array_keys($allResults));
 
@@ -445,21 +451,23 @@ final class RegistryParse extends BaseAdapter
 		Config $config,
 		Workspace $case,
 	): array {
-		$remoteHive = "{$remoteDir}/reg_rip_tmp";
+		$remoteHive  = "{$remoteDir}/reg_rip_tmp";
+		$remoteHiveQ = escapeshellarg($remoteHive);
 		$ssh->copyTo($localHive, $remoteHive);
 
-		$profile   = self::RIP_PROFILES[$hiveName] ?? 'ntuser';
-		$remoteOut = "{$remoteDir}/rip_out.txt";
+		$profile    = self::RIP_PROFILES[$hiveName] ?? 'ntuser';
+		$remoteOut  = "{$remoteDir}/rip_out.txt";
+		$remoteOutQ = escapeshellarg($remoteOut);
 
 		// rip.pl is regripper's main script on REMnux
-		$ripCmd = "rip.pl -r '{$remoteHive}' -f {$profile} > '{$remoteOut}' 2>/dev/null"
-			. " || regripper -r '{$remoteHive}' -f {$profile} > '{$remoteOut}' 2>/dev/null";
+		$ripCmd = "rip.pl -r {$remoteHiveQ} -f {$profile} > {$remoteOutQ} 2>/dev/null"
+			. " || regripper -r {$remoteHiveQ} -f {$profile} > {$remoteOutQ} 2>/dev/null";
 		$ssh->run($ripCmd, 60);
 
 		$stem    = pathinfo($localHive, PATHINFO_FILENAME);
 		$outFile = "{$case->derivedDir}/regripper_{$stem}.txt";
 		$ssh->copyFrom($remoteOut, $outFile);
-		$ssh->run("rm -f '{$remoteHive}' '{$remoteOut}'");
+		$ssh->run("rm -f {$remoteHiveQ} {$remoteOutQ}");
 
 		$text = file_exists($outFile) ? mb_substr(file_get_contents($outFile), 0, 8000) : '';
 		return ['text' => $text, 'out_file' => $outFile];
@@ -573,7 +581,7 @@ PY;
 
 		$ssh       = disk_ssh($config);
 		$remoteDir = $config->remnuxWorkDir;
-		$ssh->run("mkdir -p '{$remoteDir}'");
+		$ssh->run("mkdir -p " . escapeshellarg($remoteDir));
 
 		// ── If file/dir already extracted, parse directly via REMnux ──
 		if ($filePath !== '' && file_exists($filePath)) {
@@ -583,8 +591,9 @@ PY;
 		// ── Extract .pf files from disk image ──────────────────────
 		if (!file_exists($imgPath)) return $this->errorResult("Image not found: {$imgPath}");
 
-		$transfer = SharedPath::ensureOnREMnux($imgPath, $config, $ssh, $remoteDir);
-		$remoteFp = $transfer['path'];
+		$transfer  = SharedPath::ensureOnREMnux($imgPath, $config, $ssh, $remoteDir);
+		$remoteFp  = $transfer['path'];
+		$remoteFpQ = escapeshellarg($remoteFp);
 
 		$part    = disk_detect_partition($ssh, $remoteFp);
 		$offset  = isset($params['partition_offset']) ? (int) $params['partition_offset'] : $part['offset'];
@@ -592,7 +601,7 @@ PY;
 
 		// Find all .pf files
 		$r = $ssh->run(
-			"fls -r {$ewfFlag} -o {$offset} '{$remoteFp}' 2>/dev/null | grep -i '\\.pf$' | head -200",
+			"fls -r {$ewfFlag} -o {$offset} {$remoteFpQ} 2>/dev/null | grep -i '\\.pf$' | head -200",
 			900,
 		);
 
@@ -602,21 +611,22 @@ PY;
 
 		foreach (array_filter(array_map('trim', explode("\n", $r->stdout))) as $line) {
 			if (!preg_match('/^[rv\/\-]+\s+([\w\-]+):\s+(.+)$/', $line, $m)) continue;
-			$inode    = trim($m[1]);
-			$pfName   = basename(trim($m[2]));
-			$remotePf = "{$remoteDir}/{$pfName}";
-			$localPf  = "{$pfDir}/{$pfName}";
+			$inode     = trim($m[1]);
+			$pfName    = basename(trim($m[2]));
+			$remotePf  = "{$remoteDir}/{$pfName}";
+			$remotePfQ = escapeshellarg($remotePf);
+			$localPf   = "{$pfDir}/{$pfName}";
 
-			$ssh->run("icat {$ewfFlag} -o {$offset} '{$remoteFp}' {$inode} > '{$remotePf}' 2>/dev/null", 30);
+			$ssh->run("icat {$ewfFlag} -o {$offset} {$remoteFpQ} {$inode} > {$remotePfQ} 2>/dev/null", 30);
 			$ssh->copyFrom($remotePf, $localPf);
-			$ssh->run("rm -f '{$remotePf}'");
+			$ssh->run("rm -f {$remotePfQ}");
 
 			if (file_exists($localPf) && filesize($localPf) > 0) {
 				$localPfFiles[] = $localPf;
 			}
 		}
 
-		if ($transfer['method'] === 'sftp') $ssh->run("rm -f '{$remoteFp}'");
+		if ($transfer['method'] === 'sftp') $ssh->run("rm -f {$remoteFpQ}");
 
 		return $this->parsePfFiles($ssh, $remoteDir, [$pfDir], $dateFilter, $case, $config);
 	}
@@ -733,24 +743,26 @@ final class MftParse extends BaseAdapter
 		$maxE     = (int) ($params['max_entries']      ?? 500);
 		if (!file_exists($mftPath)) return $this->errorResult("File not found: {$mftPath}");
 
-		$ssh  = remnux_ssh($config);
-		$rd   = $config->remnuxWorkDir;
-		$ssh->run("mkdir -p '{$rd}'");
-		$t    = SharedPath::ensureOnREMnux($mftPath, $config, $ssh, $rd);
-		$rMft = $t['path'];
-		$rCsv = "{$rd}/mft_out.csv";
+		$ssh   = remnux_ssh($config);
+		$rd    = $config->remnuxWorkDir;
+		$ssh->run("mkdir -p " . escapeshellarg($rd));
+		$t     = SharedPath::ensureOnREMnux($mftPath, $config, $ssh, $rd);
+		$rMft  = $t['path'];
+		$rMftQ = escapeshellarg($rMft);
+		$rCsv  = "{$rd}/mft_out.csv";
+		$rCsvQ = escapeshellarg($rCsv);
 		$ssh->run(
 			"if command -v analyzeMFT.py &>/dev/null || command -v analyzeMFT &>/dev/null; then " .
 			"BIN=\$(command -v analyzeMFT.py 2>/dev/null || command -v analyzeMFT); " .
-			"python3 \"\$BIN\" -f '{$rMft}' -o '{$rCsv}' -e 2>/dev/null; " .
-			"elif command -v mftdump &>/dev/null; then mftdump --output-format csv '{$rMft}' > '{$rCsv}' 2>/dev/null; " .
-			"else echo 'NO_MFT_TOOL' > '{$rCsv}'; fi",
+			"python3 \"\$BIN\" -f {$rMftQ} -o {$rCsvQ} -e 2>/dev/null; " .
+			"elif command -v mftdump &>/dev/null; then mftdump --output-format csv {$rMftQ} > {$rCsvQ} 2>/dev/null; " .
+			"else echo 'NO_MFT_TOOL' > {$rCsvQ}; fi",
 			300
 		);
 		$lCsv = "{$case->derivedDir}/mft_" . pathinfo($mftPath, PATHINFO_FILENAME) . '.csv';
 		$ssh->copyFrom($rCsv, $lCsv);
-		$ssh->run("rm -f '{$rCsv}'");
-		if ($t['method'] === 'sftp') $ssh->run("rm -f '{$rMft}'");
+		$ssh->run("rm -f {$rCsvQ}");
+		if ($t['method'] === 'sftp') $ssh->run("rm -f {$rMftQ}");
 		if (!file_exists($lCsv) || filesize($lCsv) < 10) return $this->errorResult('analyzeMFT produced no output. Install: pip3 install analyzeMFT');
 		$head = trim((file($lCsv) ?: [''])[0]);
 		if (str_contains($head, 'NO_MFT_TOOL')) return $this->errorResult('No MFT parser on REMnux. Install: pip3 install analyzeMFT');
@@ -859,24 +871,26 @@ final class ShimcacheAmcacheParse extends BaseAdapter
 		if ($sysHive === '' && $amcHive === '') return $this->errorResult('Provide system_hive and/or amcache_hive.');
 		$ssh  = remnux_ssh($config);
 		$rd   = $config->remnuxWorkDir;
-		$ssh->run("mkdir -p '{$rd}'");
+		$ssh->run("mkdir -p " . escapeshellarg($rd));
 		$results = [];
 		$ev      = [];
 
 		$runPlugin = function(string $hive, string $plugin, string $label) use ($ssh, $rd, $config, $case, $keyword, $timeFrom, &$ev): array {
-			$t  = SharedPath::ensureOnREMnux($hive, $config, $ssh, $rd);
-			$rh = $t['path'];
-			$ro = "{$rd}/{$label}_out.txt";
+			$t   = SharedPath::ensureOnREMnux($hive, $config, $ssh, $rd);
+			$rh  = $t['path'];
+			$rhQ = escapeshellarg($rh);
+			$ro  = "{$rd}/{$label}_out.txt";
+			$roQ = escapeshellarg($ro);
 			$ssh->run(
-				"if command -v rip.pl &>/dev/null; then rip.pl -r '{$rh}' -p {$plugin} > '{$ro}' 2>&1; " .
-				"elif command -v regripper &>/dev/null; then regripper -r '{$rh}' -p {$plugin} > '{$ro}' 2>&1; " .
-				"else echo NO_REGRIPPER > '{$ro}'; fi",
+				"if command -v rip.pl &>/dev/null; then rip.pl -r {$rhQ} -p {$plugin} > {$roQ} 2>&1; " .
+				"elif command -v regripper &>/dev/null; then regripper -r {$rhQ} -p {$plugin} > {$roQ} 2>&1; " .
+				"else echo NO_REGRIPPER > {$roQ}; fi",
 				60
 			);
 			$lo = "{$case->derivedDir}/{$label}_" . pathinfo($hive, PATHINFO_FILENAME) . '.txt';
 			$ssh->copyFrom($ro, $lo);
-			$ssh->run("rm -f '{$ro}'");
-			if ($t['method'] === 'sftp') $ssh->run("rm -f '{$rh}'");
+			$ssh->run("rm -f {$roQ}");
+			if ($t['method'] === 'sftp') $ssh->run("rm -f {$rhQ}");
 			if (!file_exists($lo)) return [];
 			$lines   = file($lo, FILE_IGNORE_NEW_LINES) ?: [];
 			$entries = [];

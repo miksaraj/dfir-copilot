@@ -909,6 +909,24 @@ final class DecryptZip extends BaseAdapter
 		];
 	}
 
+	/**
+	 * Resolve a path's "." and ".." segments lexically, without requiring
+	 * the path to exist on disk (unlike realpath()).
+	 */
+	private function normalizePath(string $path): string
+	{
+		$parts = [];
+		foreach (explode('/', $path) as $segment) {
+			if ($segment === '' || $segment === '.') continue;
+			if ($segment === '..') {
+				array_pop($parts);
+				continue;
+			}
+			$parts[] = $segment;
+		}
+		return '/' . implode('/', $parts);
+	}
+
 	/** Extract one ZIP into $destPath, return [extracted_count, failed_names[]] */
 	private function extractZip(string $zipPath, string $destPath, string $password): array
 	{
@@ -923,17 +941,33 @@ final class DecryptZip extends BaseAdapter
 		if (!is_dir($destPath)) {
 			mkdir($destPath, 0755, true);
 		}
+		$destReal = realpath($destPath);
+		if ($destReal === false) {
+			$zip->close();
+			return [0, ["Destination directory could not be resolved: {$destPath}"]];
+		}
+		$destReal = rtrim($destReal, '/');
+
 		$extracted = 0;
 		$failed    = [];
 		for ($i = 0; $i < $zip->numFiles; $i++) {
 			$name = $zip->getNameIndex($i);
 			if ($name === false || str_ends_with($name, '/')) continue;
-			$target = rtrim($destPath, '/') . '/' . $name;
-			$dir    = dirname($target);
+
+			$target = $destReal . '/' . $name;
+			$dir    = $this->normalizePath(dirname($target));
+
+			// Reject entries whose normalized path escapes the destination
+			// directory (zip-slip / path traversal via "../" or absolute names).
+			if ($dir !== $destReal && !str_starts_with($dir, $destReal . '/')) {
+				$failed[] = $name;
+				continue;
+			}
+
 			if (!is_dir($dir)) mkdir($dir, 0755, true);
 			$content = $zip->getFromIndex($i);
 			if ($content === false) { $failed[] = $name; continue; }
-			file_put_contents($target, $content);
+			file_put_contents($dir . '/' . basename($target), $content);
 			$extracted++;
 		}
 		$zip->close();

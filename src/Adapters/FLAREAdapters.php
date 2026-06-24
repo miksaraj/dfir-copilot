@@ -56,10 +56,14 @@ final class PEQuicklook extends BaseAdapter
 
 		$winrm = WinRMExecutor::fromConfig($config);
 
+		// Escape for embedding in a PowerShell single-quoted string literal
+		// (single quotes are escaped by doubling, per PowerShell syntax).
+		$vmFilePs = str_replace("'", "''", $vmFile);
+
 		// PowerShell script using .NET reflection — works on any Windows
 		$ps = <<<PS
 \$ErrorActionPreference = 'SilentlyContinue'
-\$filePath = '{$vmFile}'
+\$filePath = '{$vmFilePs}'
 \$result = @{}
 
 \$fileInfo = Get-Item \$filePath
